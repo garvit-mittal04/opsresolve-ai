@@ -154,6 +154,13 @@ def exceptions_frame(result: InvestigationResult) -> pd.DataFrame:
         "recommended_action", "evidence", "notes"])
 
 
+def validation_frame(result: InvestigationResult) -> pd.DataFrame:
+    return pd.DataFrame(
+        [i.model_dump() for i in result.dataset.issues],
+        columns=["file", "row", "field", "message", "value"],
+    )
+
+
 def render_console(result: InvestigationResult) -> str:
     out = []
     for label, read, accepted, rejected in _summary_rows(result):
@@ -176,8 +183,5 @@ def write_reports(result: InvestigationResult, output_dir: str | Path) -> dict[s
     }
     paths["markdown"].write_text(render_markdown(result), encoding="utf-8")
     exceptions_frame(result).to_csv(paths["exceptions_csv"], index=False)
-    pd.DataFrame(
-        [i.model_dump() for i in result.dataset.issues],
-        columns=["file", "row", "field", "message", "value"],
-    ).to_csv(paths["validation_csv"], index=False)
+    validation_frame(result).to_csv(paths["validation_csv"], index=False)
     return paths

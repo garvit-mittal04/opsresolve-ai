@@ -1,0 +1,27 @@
+# Streamlit settings for the local OpsResolve web app (read when running `streamlit run app.py`
+# from the repository root).
+
+[server]
+# Listen on this computer only; the app is not reachable from other devices on the network.
+address = "localhost"
+port = 8501
+# Largest accepted upload, in megabytes.
+maxUploadSize = 20
+# Keep Streamlit's default cross-site request forgery protection on.
+enableXsrfProtection = true
+
+[browser]
+# Do not send anonymous usage statistics to Streamlit.
+gatherUsageStats = false
+serverAddress = "localhost"
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#1f3a5f"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6f8"
+textColor = "#1d2733"
+font = "sans serif"

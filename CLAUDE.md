@@ -39,8 +39,10 @@ src/opsresolve/
   detection.py   Exception rules, amounts, severity, recommended actions     (pure)
   pipeline.py    Orchestration: ingestion -> matching -> detection
   reporting.py   Markdown / CSV / console rendering                         (no rules)
+  webapp.py      Helpers for app.py: temp-file runs, summaries, safe downloads (no rules, no Streamlit)
   evaluation.py  Scores the pipeline against data/evaluation's answer key    (P/R/F1)
   cli.py         Command-line entry point
+app.py           Streamlit local web app (layout only; run: streamlit run app.py)
 data/sample/     Synthetic CSVs + README describing every seeded scenario
 data/evaluation/ Labelled evaluation dataset (scenarios.csv, expected_exceptions.csv)
 tests/           Pytest suite (unit + end-to-end on sample data)
@@ -70,4 +72,6 @@ python -m opsresolve         # run on data/sample, write reports/ (git-ignored)
   keep it green, and keep its permissions read-only and its actions pinned to commit SHAs.
 - Run `pytest` and make it pass before declaring work complete. Do not report tests as passing
   unless they were actually run.
-- Keep dependencies minimal (pandas, pydantic; pytest for dev).
+- Keep dependencies minimal (pandas, pydantic; pytest for dev; Streamlit only in the optional `app` extra).
+- The web app must stay a thin layer: no business rules in `app.py` or `webapp.py`, uploaded text never
+  rendered as raw Markdown/HTML, and the server bound to localhost with telemetry off.
