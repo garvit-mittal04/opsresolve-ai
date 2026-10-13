@@ -160,11 +160,16 @@ def test_reformatted_invoice_number_flagged_as_possible_duplicate():
     assert any("possible duplicates" in n for n in qty.notes)
 
 
-def test_identical_content_flagged_only_when_billing_exceeds_supply():
+def test_identical_content_judged_by_supply_evidence():
     invoices = [inv("A-1", qty="80", price="24.50", on=date(2026, 9, 3)),
                 inv("B-2", qty="80", price="24.50", on=date(2026, 9, 12))]
-    over = run([po(qty="160", price="24.50")], invoices, [grn(qty="80")])
-    assert len(of_type(over, T.POSSIBLE_DUPLICATE_INVOICE)) == 1
+    over_ordered = run([po(qty="80", price="24.50")], invoices, [grn(qty="80")])
+    assert len(of_type(over_ordered, T.POSSIBLE_DUPLICATE_INVOICE)) == 1
+    # Over received but within ordered: could be an unposted receipt, so not claimed as a duplicate.
+    open_on_po = run([po(qty="160", price="24.50")], invoices, [grn(qty="80")])
+    assert of_type(open_on_po, T.POSSIBLE_DUPLICATE_INVOICE) == []
+    [qty] = of_type(open_on_po, T.QUANTITY_MISMATCH)
+    assert any("same line items as invoice A-1" in n for n in qty.notes)
     fully_received = run([po(qty="160", price="24.50")], invoices, [grn(qty="160")])
     assert of_type(fully_received, T.POSSIBLE_DUPLICATE_INVOICE) == []
 

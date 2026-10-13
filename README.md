@@ -121,8 +121,8 @@ then prints the evaluation report to the run summary (see [`.github/workflows/ci
 ## Evaluation
 
 OpsResolve is measured against a labelled synthetic dataset in [`data/evaluation/`](data/evaluation/):
-35 scenarios (37 PO lines, 42 invoice lines, 37 receipt lines, 3 per-SKU unit conversions) and a
-hand-computed answer key of 35 expected exceptions covering every exception type.
+36 scenarios (38 PO lines, 44 invoice lines, 38 receipt lines, 3 per-SKU unit conversions) and a
+hand-computed answer key of 37 expected exceptions covering every exception type.
 
 ```bash
 python -m opsresolve.evaluation                              # print the report
@@ -140,10 +140,12 @@ duplicate invoices, units of measure, and lines with several simultaneous discre
 
 **Ground truth.** The answer key records what a careful reviewer should conclude about each scenario,
 not what the engine currently outputs. Scenarios are marked `known_limitation` when the documented rules
-are expected to get them wrong; two remain: a duplicate re-sent outside the 30-day window (S26) and a
-legitimate second invoice whose goods receipt is not yet posted (S27). S32 (boxes of 12 invoiced in
-units) was a known limitation until unit-of-measure support was added; its expected outcome (no
-exceptions) never changed, only its documents gained explicit units and a conversion row.
+are expected to get them wrong; one remains: S36, a real duplicate on a half-received PO whose records
+are indistinguishable from the legitimate second invoice in S27 (see "Duplicate invoices" below).
+Earlier known limitations were resolved without changing their expected outcomes: S32 (boxes of 12
+invoiced in units) by unit-of-measure support, which added explicit units and a conversion row to its
+documents; S26 (a duplicate re-sent after 60 days) and S27 (a legitimate second invoice whose receipt
+is not yet posted) by the supply-evidence duplicate rule.
 
 **Definitions.**
 
@@ -163,14 +165,36 @@ exceptions) never changed, only its documents gained explicit units and a conver
 
 | TP | FP | FN | Precision | Recall | F1 | Exact amounts | Scenarios fully correct |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 34 | 1 | 1 | 0.971 | 0.971 | 0.971 | 34 / 34 | 33 / 35 |
+| 36 | 0 | 1 | 1.000 | 0.973 | 0.986 | 36 / 36 | 35 / 36 |
 
-All misses are the two known-limitation scenarios: one missed duplicate (S26) and one false duplicate
-(S27). Before unit-of-measure support, the same 35-scenario dataset scored TP 33, FP 8, FN 2
-(F1 0.868), and the original 32-scenario dataset scored TP 32, FP 3, FN 1 (F1 0.941).
-`tests/test_evaluation.py` pins these
+The one miss is the known-limitation scenario S36. History, each measured on a fixed dataset:
+
+| Change | Dataset | Before (TP / FP / FN, F1) | After (TP / FP / FN, F1) |
+|---|---|---|---|
+| Unit-of-measure support | 35 scenarios | 33 / 8 / 2, 0.868 | 34 / 1 / 1, 0.971 |
+| Duplicate supply evidence | 35 scenarios (S1–S35) | 34 / 1 / 1, 0.971 | 35 / 0 / 0, 1.000 |
+| Duplicate supply evidence | 36 scenarios (adds S36) | 36 / 1 / 1, 0.973 | 36 / 0 / 1, 0.986 |
+
+The perfect score on S1–S35 does not mean duplicate detection is solved: S36 was added to show the
+pattern the new rule deliberately leaves unclaimed. `tests/test_evaluation.py` pins these
 numbers, so any change in detection behaviour fails CI until the change and the documented results are
 reviewed together.
+
+**Duplicate invoices.** Rule (b) compares invoices from one supplier with identical line items and decides
+what they mean from the PO line, because the ordered quantity is fixed on the PO while receipts can be
+posted late:
+
+| Evidence on the PO line | Outcome |
+|---|---|
+| billed more than **ordered** | `POSSIBLE_DUPLICATE_INVOICE`, whatever the date gap (the PO cannot support both) |
+| billed more than **received**, within ordered | not claimed as a duplicate (could be an unposted receipt); a note naming the identical invoice is added to the line's quantity-mismatch or missing-receipt exception, which already holds payment. Only within the duplicate window |
+| covered by receipts | nothing (split billing) |
+| no PO line, or units unresolved | `POSSIBLE_DUPLICATE_INVOICE` within the duplicate window (unchanged) |
+
+Reformatted invoice numbers (rule a) and lines repeated within one invoice are flagged as before.
+Remaining limitations: a duplicate on a PO with open quantity (S36) is not claimed as one, only noted;
+identical invoices outside the window within the ordered quantity are not linked at all; a PO that is
+genuinely over-delivered and billed twice for identical amounts will be flagged as a possible duplicate.
 
 **Limitations.** These numbers measure agreement with scenarios written by the same team that wrote
 the rules, on a small, clean, synthetic dataset. They are **not** an estimate of accuracy on real

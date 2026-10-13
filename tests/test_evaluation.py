@@ -230,20 +230,32 @@ def evaluation():
 
 def test_measured_overall_results(evaluation):
     assert evaluation.validation_issues == []
-    assert evaluation.overall == Metrics(tp=34, fp=1, fn=1)
-    assert evaluation.amounts_correct == 34
+    assert evaluation.overall == Metrics(tp=36, fp=0, fn=1)
+    assert evaluation.amounts_correct == 36
 
 
 def test_only_known_limitation_scenarios_fail(evaluation):
     failing = {s.scenario.scenario_id for s in evaluation.scenarios if not s.passed}
     flagged = {s.scenario.scenario_id for s in evaluation.scenarios if s.scenario.known_limitation}
-    assert failing == flagged == {"S26", "S27"}
+    assert failing == flagged == {"S36"}
 
 
 def test_known_limitation_details(evaluation):
     by_id = {s.scenario.scenario_id: s for s in evaluation.scenarios}
-    assert [e.exception_type for e in by_id["S26"].false_negatives] == [T.POSSIBLE_DUPLICATE_INVOICE]
-    assert [e.exception_type for e in by_id["S27"].false_positives] == [T.POSSIBLE_DUPLICATE_INVOICE]
+    # S36 is a real duplicate whose records are indistinguishable from legitimate S27.
+    assert [e.exception_type for e in by_id["S36"].false_negatives] == [T.POSSIBLE_DUPLICATE_INVOICE]
+    assert by_id["S36"].false_positives == []
+
+
+def test_duplicate_scenarios(evaluation):
+    by_id = {s.scenario.scenario_id: s for s in evaluation.scenarios}
+    assert all(by_id[sid].passed for sid in ("S23", "S24", "S25", "S26", "S27"))
+    s26_types = sorted(p.predicted.exception_type.value for p in by_id["S26"].matched)
+    assert s26_types == ["POSSIBLE_DUPLICATE_INVOICE", "QUANTITY_MISMATCH"]
+    [s27] = by_id["S27"].matched  # quantity mismatch only, carrying the ambiguity note
+    assert any("cannot tell these apart" in n for n in s27.predicted.notes)
+    [s36_qty] = by_id["S36"].matched  # the same note is what a reviewer sees for S36
+    assert any("cannot tell these apart" in n for n in s36_qty.predicted.notes)
 
 
 def test_unit_of_measure_scenarios(evaluation):
@@ -258,8 +270,8 @@ def test_unit_of_measure_scenarios(evaluation):
 
 def test_measured_results_by_type(evaluation):
     by_type = evaluation.by_type()
-    assert by_type[T.POSSIBLE_DUPLICATE_INVOICE] == Metrics(tp=3, fp=1, fn=1)
-    assert by_type[T.QUANTITY_MISMATCH] == Metrics(tp=12, fp=0, fn=0)
+    assert by_type[T.POSSIBLE_DUPLICATE_INVOICE] == Metrics(tp=4, fp=0, fn=1)
+    assert by_type[T.QUANTITY_MISMATCH] == Metrics(tp=13, fp=0, fn=0)
     assert by_type[T.PRICE_MISMATCH] == Metrics(tp=7, fp=0, fn=0)
     assert by_type[T.UNIT_OF_MEASURE_MISMATCH] == Metrics(tp=1, fp=0, fn=0)
     for exc_type in (T.CURRENCY_MISMATCH, T.SUPPLIER_MISMATCH, T.MISSING_PURCHASE_ORDER,
@@ -276,7 +288,7 @@ def test_cli_prints_and_writes_report(tmp_path, capsys):
     out = tmp_path / "eval.md"
     assert main(["--dataset-dir", str(EVAL_DIR), "--output", str(out)]) == 0
     printed = capsys.readouterr().out
-    assert "| F1 | 0.971 |" in printed
+    assert "| F1 | 0.986 |" in printed
     assert out.read_text(encoding="utf-8") == printed
 
 

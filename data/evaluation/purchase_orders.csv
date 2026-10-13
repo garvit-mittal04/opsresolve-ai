@@ -36,3 +36,4 @@ po_number,line_number,supplier_id,supplier_name,sku,description,quantity_ordered
 4600003301,1,SUP-E06,Synthetic Supplier E06,EV-AF,Synthetic item AF (case),5,60.00,USD,2026-07-16,CASE
 4600003401,1,SUP-E07,Synthetic Supplier E07,EV-AG,Synthetic item AG (box of 6),4,30.00,USD,2026-07-16,BOX
 4600003501,1,SUP-E08,Synthetic Supplier E08,EV-AH,Synthetic item AH (case of 24),10,48.00,USD,2026-07-16,CASE
+4600003601,1,SUP-E07,Synthetic Supplier E07,EV-AI,Synthetic item AI,200,1.60,USD,2026-07-17,
