@@ -372,6 +372,16 @@ def _check_columns(label: str, value: Any, where: str, problems: list[str]) -> d
 # Strict value parsing
 # --------------------------------------------------------------------------- #
 
+MAX_PREVIEW_CHARS = 40
+
+
+def preview(text: str, limit: int = MAX_PREVIEW_CHARS) -> str:
+    """A quoted value for an error message, shortened so a huge cell cannot flood the report."""
+    if len(text) <= limit:
+        return repr(text)
+    return f"{text[:limit]!r}... ({len(text)} characters)"
+
+
 def _number_pattern(decimal_separator: str, thousands_separator: str) -> re.Pattern[str]:
     if thousands_separator:
         grouped = rf"[0-9]{{1,3}}(?:{re.escape(thousands_separator)}[0-9]{{3}})+"
@@ -396,7 +406,7 @@ def parse_number(text: str, decimal_separator: str = ".", thousands_separator: s
     match = _number_pattern(decimal_separator, thousands_separator).fullmatch(value)
     if match is None:
         thousands = repr(thousands_separator) if thousands_separator else "none"
-        raise ValueError(f"{text!r} is not a number in the declared format "
+        raise ValueError(f"{preview(text)} is not a number in the declared format "
                          f"(decimal separator {decimal_separator!r}, thousands separator {thousands})")
     digits = match["int"].replace(thousands_separator, "") if thousands_separator else match["int"]
     return f"{match['sign']}{digits}" + (f".{match['frac']}" if match["frac"] is not None else "")
@@ -413,8 +423,8 @@ def parse_date(text: str, date_format: str = "YYYY-MM-DD") -> str:
     value = text.strip()
     match = re.fullmatch(DATE_FORMATS[date_format], value)
     if match is None:
-        raise ValueError(f"{text!r} does not match the declared date format {date_format}")
+        raise ValueError(f"{preview(text)} does not match the declared date format {date_format}")
     try:
         return date(int(match["y"]), int(match["m"]), int(match["d"])).isoformat()
     except ValueError:
-        raise ValueError(f"{text!r} is not a valid calendar date (format {date_format})") from None
+        raise ValueError(f"{preview(text)} is not a valid calendar date (format {date_format})") from None

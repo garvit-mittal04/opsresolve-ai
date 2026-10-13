@@ -1,0 +1,3 @@
+grn_number,received_date,supplier_id,po_number,sku,quantity_received,unit_of_measure
+WE-1,2026-02-07,SUP-77,PO-9001,A-100,100,BOX
+WE-1,2026-02-07,SUP-77,PO-9001,B-200,8,EA

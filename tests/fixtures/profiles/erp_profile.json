@@ -1,0 +1,42 @@
+{
+  "profile_version": 1,
+  "name": "Fictional ERP export (test fixture)",
+  "defaults": {
+    "delimiter": ";",
+    "encoding": "cp1252",
+    "date_format": "DD.MM.YYYY",
+    "decimal_separator": ",",
+    "thousands_separator": "."
+  },
+  "files": {
+    "purchase_orders": {
+      "columns": {
+        "po_number": "Bestellnummer", "line_number": "Position", "supplier_id": "Lieferant",
+        "supplier_name": "Lieferantenname", "sku": "Artikel", "description": "Bezeichnung",
+        "quantity_ordered": "Menge", "unit_price": "Preis", "currency": "Währung",
+        "order_date": "Bestelldatum", "unit_of_measure": "ME"
+      }
+    },
+    "invoices": {
+      "delimiter": "\t", "encoding": "utf-8", "date_format": "YYYYMMDD",
+      "decimal_separator": ".", "thousands_separator": ",",
+      "columns": {
+        "invoice_number": "Invoice No", "invoice_date": "Invoice Date", "supplier_id": "Vendor",
+        "po_number": "PO", "sku": "Item", "quantity_invoiced": "Qty", "unit_price": "Unit Price",
+        "unit_of_measure": "UoM"
+      }
+    },
+    "goods_received": {
+      "delimiter": "|", "encoding": "iso-8859-1", "date_format": "DD/MM/YYYY",
+      "decimal_separator": ",", "thousands_separator": " ",
+      "columns": {
+        "grn_number": "Wareneingang", "received_date": "Eingangsdatum", "supplier_id": "Lieferant",
+        "po_number": "Bestellnummer", "sku": "Artikel", "quantity_received": "Menge erhalten",
+        "unit_of_measure": "ME"
+      }
+    },
+    "uom_conversions": {
+      "columns": {"sku": "Artikel", "uom": "Einheit", "base_uom": "Basiseinheit", "units_per_uom": "Faktor"}
+    }
+  }
+}

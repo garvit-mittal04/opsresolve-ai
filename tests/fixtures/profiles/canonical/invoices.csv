@@ -1,0 +1,3 @@
+invoice_number,invoice_date,supplier_id,po_number,sku,quantity_invoiced,unit_price,currency,unit_of_measure
+INV-501,2026-02-10,SUP-77,PO-9001,A-100,1200,12.75,EUR,EA
+INV-502,2026-02-10,SUP-77,PO-9001,B-200,10,1234.56,EUR,EA

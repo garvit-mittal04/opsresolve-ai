@@ -11,6 +11,7 @@ from opsresolve.detection import RejectedKeys, detect_exceptions
 from opsresolve.ingestion import Dataset, load_dataset
 from opsresolve.matching import MatchResult, match_records
 from opsresolve.models import OpsException
+from opsresolve.profiles import ImportProfile
 from opsresolve.uom import UnitNormalization, normalize_units
 
 
@@ -45,5 +46,7 @@ def investigate_files(
     grn_path: str | Path,
     config: MatchConfig | None = None,
     uom_conversions_path: str | Path | None = None,
+    profile: ImportProfile | None = None,
 ) -> InvestigationResult:
-    return investigate(load_dataset(po_path, invoice_path, grn_path, uom_conversions_path), config)
+    """Load and investigate the files; ``profile`` (optional) declares their CSV format."""
+    return investigate(load_dataset(po_path, invoice_path, grn_path, uom_conversions_path, profile), config)
