@@ -230,29 +230,38 @@ def evaluation():
 
 def test_measured_overall_results(evaluation):
     assert evaluation.validation_issues == []
-    assert evaluation.overall == Metrics(tp=32, fp=3, fn=1)
-    assert evaluation.amounts_correct == 32
+    assert evaluation.overall == Metrics(tp=34, fp=1, fn=1)
+    assert evaluation.amounts_correct == 34
 
 
 def test_only_known_limitation_scenarios_fail(evaluation):
     failing = {s.scenario.scenario_id for s in evaluation.scenarios if not s.passed}
     flagged = {s.scenario.scenario_id for s in evaluation.scenarios if s.scenario.known_limitation}
-    assert failing == flagged == {"S26", "S27", "S32"}
+    assert failing == flagged == {"S26", "S27"}
 
 
 def test_known_limitation_details(evaluation):
     by_id = {s.scenario.scenario_id: s for s in evaluation.scenarios}
     assert [e.exception_type for e in by_id["S26"].false_negatives] == [T.POSSIBLE_DUPLICATE_INVOICE]
     assert [e.exception_type for e in by_id["S27"].false_positives] == [T.POSSIBLE_DUPLICATE_INVOICE]
-    assert sorted(e.exception_type.value for e in by_id["S32"].false_positives) == [
-        "PRICE_MISMATCH", "QUANTITY_MISMATCH"]
+
+
+def test_unit_of_measure_scenarios(evaluation):
+    by_id = {s.scenario.scenario_id: s for s in evaluation.scenarios}
+    assert all(by_id[sid].passed for sid in ("S32", "S33", "S34", "S35"))
+    assert by_id["S32"].matched == [] and by_id["S34"].matched == []  # conversion removes false positives
+    [unit] = by_id["S33"].matched
+    assert unit.predicted.exception_type == T.UNIT_OF_MEASURE_MISMATCH
+    [price] = by_id["S35"].matched
+    assert price.predicted.exception_type == T.PRICE_MISMATCH and price.amount_correct
 
 
 def test_measured_results_by_type(evaluation):
     by_type = evaluation.by_type()
     assert by_type[T.POSSIBLE_DUPLICATE_INVOICE] == Metrics(tp=3, fp=1, fn=1)
-    assert by_type[T.QUANTITY_MISMATCH] == Metrics(tp=12, fp=1, fn=0)
-    assert by_type[T.PRICE_MISMATCH] == Metrics(tp=6, fp=1, fn=0)
+    assert by_type[T.QUANTITY_MISMATCH] == Metrics(tp=12, fp=0, fn=0)
+    assert by_type[T.PRICE_MISMATCH] == Metrics(tp=7, fp=0, fn=0)
+    assert by_type[T.UNIT_OF_MEASURE_MISMATCH] == Metrics(tp=1, fp=0, fn=0)
     for exc_type in (T.CURRENCY_MISMATCH, T.SUPPLIER_MISMATCH, T.MISSING_PURCHASE_ORDER,
                      T.MISSING_GOODS_RECEIPT, T.MISSING_INVOICE):
         assert by_type[exc_type].fp == 0 and by_type[exc_type].fn == 0
@@ -267,7 +276,7 @@ def test_cli_prints_and_writes_report(tmp_path, capsys):
     out = tmp_path / "eval.md"
     assert main(["--dataset-dir", str(EVAL_DIR), "--output", str(out)]) == 0
     printed = capsys.readouterr().out
-    assert "| F1 | 0.941 |" in printed
+    assert "| F1 | 0.971 |" in printed
     assert out.read_text(encoding="utf-8") == printed
 
 

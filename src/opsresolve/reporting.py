@@ -16,10 +16,10 @@ from opsresolve.pipeline import InvestigationResult
 
 def _summary_rows(result: InvestigationResult) -> list[tuple[str, int, int, int]]:
     ds = result.dataset
-    return [
-        (load.file_label, load.rows_read, len(load.records), load.rows_rejected)
-        for load in (ds.purchase_orders, ds.invoices, ds.goods_received)
-    ]
+    loads = [ds.purchase_orders, ds.invoices, ds.goods_received]
+    if ds.uom_conversions is not None:
+        loads.append(ds.uom_conversions)
+    return [(load.file_label, load.rows_read, len(load.records), load.rows_rejected) for load in loads]
 
 
 def _amounts_by_type(result: InvestigationResult) -> dict[ExceptionType, dict[str, Decimal]]:

@@ -1,4 +1,4 @@
-"""Orchestrates ingestion -> matching -> detection. No I/O formatting here."""
+"""Orchestrates ingestion -> matching -> unit normalisation -> detection. No I/O formatting here."""
 
 from __future__ import annotations
 
@@ -11,15 +11,17 @@ from opsresolve.detection import RejectedKeys, detect_exceptions
 from opsresolve.ingestion import Dataset, load_dataset
 from opsresolve.matching import MatchResult, match_records
 from opsresolve.models import OpsException
+from opsresolve.uom import UnitNormalization, normalize_units
 
 
 @dataclass
 class InvestigationResult:
     dataset: Dataset
-    match: MatchResult
+    match: MatchResult  # after unit normalisation (identical to the raw match when no units are stated)
     exceptions: list[OpsException]
     config: MatchConfig
     generated_at: datetime
+    units: UnitNormalization | None = None
 
 
 def investigate(dataset: Dataset, config: MatchConfig | None = None) -> InvestigationResult:
@@ -31,11 +33,17 @@ def investigate(dataset: Dataset, config: MatchConfig | None = None) -> Investig
         invoices=dataset.invoices.rejected_keys,
         goods_received=dataset.goods_received.rejected_keys,
     )
-    exceptions = detect_exceptions(match, dataset.invoices.records, config, rejected)
-    return InvestigationResult(dataset, match, exceptions, config, datetime.now(timezone.utc))
+    conversions = dataset.uom_conversions.records if dataset.uom_conversions is not None else []
+    units = normalize_units(match, conversions)
+    exceptions = detect_exceptions(units.match, dataset.invoices.records, config, rejected, units.unresolved)
+    return InvestigationResult(dataset, units.match, exceptions, config, datetime.now(timezone.utc), units)
 
 
 def investigate_files(
-    po_path: str | Path, invoice_path: str | Path, grn_path: str | Path, config: MatchConfig | None = None
+    po_path: str | Path,
+    invoice_path: str | Path,
+    grn_path: str | Path,
+    config: MatchConfig | None = None,
+    uom_conversions_path: str | Path | None = None,
 ) -> InvestigationResult:
-    return investigate(load_dataset(po_path, invoice_path, grn_path), config)
+    return investigate(load_dataset(po_path, invoice_path, grn_path, uom_conversions_path), config)

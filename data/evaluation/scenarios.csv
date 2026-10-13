@@ -30,4 +30,7 @@ S28,multiple_discrepancies,4600002801,false,Short receipt (95 of 100) and invoic
 S29,multiple_discrepancies,4600002901,false,Over-delivery (55 vs 50 ordered) and invoice overpriced (4.20 vs 4.00)
 S30,multiple_discrepancies,4600003001,false,Invoice from a different supplier at a higher price with no goods receipt
 S31,multiple_discrepancies,4600003101,false,Three-line PO: one clean line; one short-received line; one received but not invoiced
-S32,unit_of_measure,4600003201,true,PO in boxes of 12 (10 x 24.00) but invoice in units (120 x 2.00); same value and no real discrepancy
+S32,unit_of_measure,4600003201,false,PO in boxes of 12 (10 x 24.00) but invoice in units (120 x 2.00); same value and no real discrepancy
+S33,unit_of_measure,4600003301,false,PO and receipt in CASE but invoice in EA with no conversion known for the SKU; quantities and prices cannot be compared
+S34,unit_of_measure,4600003401,false,Box size differs by SKU: 4 BOX of 6 invoiced as 24 EA at 5.00 (a box of 12 for another SKU must not be assumed)
+S35,unit_of_measure,4600003501,false,Invoice in EA (240 x 2.10) against PO in CASE of 24 (10 x 48.00); quantity agrees after conversion but price is 2.10 vs 2.00 per EA

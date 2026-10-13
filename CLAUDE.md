@@ -35,6 +35,7 @@ src/opsresolve/
   config.py      MatchConfig: tolerances & severity thresholds (env: OPSRESOLVE_*)
   ingestion.py   CSV -> validated records + ValidationIssues   (Pandas + Pydantic; no rules)
   matching.py    Group invoices/receipts under PO lines by (po_number, sku)   (pure)
+  uom.py         Convert documents to the PO line's unit via per-SKU table    (pure)
   detection.py   Exception rules, amounts, severity, recommended actions     (pure)
   pipeline.py    Orchestration: ingestion -> matching -> detection
   reporting.py   Markdown / CSV / console rendering                         (no rules)
