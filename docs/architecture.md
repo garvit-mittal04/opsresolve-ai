@@ -125,6 +125,25 @@ It depends on the pipeline but nothing in the pipeline depends on it. Methodolog
 - Ingestion rejects invalid conversion rows (non-positive size, bad unit code, a base unit with size ≠ 1)
   and treats conflicting rows for one `(sku, uom)` as ambiguous, rejecting all of them.
 
+## Local web app
+
+`app.py` (Streamlit) is a presentation layer over the same pipeline as the CLI:
+
+```
+browser ──► app.py (layout, widgets) ──► webapp.py (plain Python) ──► pipeline.investigate_files
+                                          │  uploads → fixed names in a TemporaryDirectory (deleted after the run)
+                                          │  summaries: counts of result.exceptions / dataset.issues
+                                          │  downloads: reporting.exceptions_frame / validation_frame / render_markdown
+                                          └  CSV formula neutralisation (downloads only)
+```
+
+- `webapp.py` imports no Streamlit and contains no business rules, so it is unit-tested directly
+  (`tests/test_webapp.py`); `app.py` is tested with Streamlit's `AppTest` (`tests/test_app_ui.py`).
+- Each stored result carries a fingerprint of the uploaded bytes and the rule settings; any change
+  removes the stored result before the page renders.
+- Text from uploaded files is shown in tables or Markdown-escaped, never rendered as Markdown/HTML.
+- `.streamlit/config.toml` binds the server to `localhost`, disables usage statistics and limits uploads.
+
 ## Configuration
 
 `MatchConfig` (Pydantic, validated) reads `OPSRESOLVE_*` environment variables — see `.env.example`.

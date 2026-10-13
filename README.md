@@ -6,9 +6,9 @@ AI-powered operations exception investigator for manufacturing and distribution 
 OpsResolve finds discrepancies between **purchase orders**, **supplier invoices** and
 **goods-received records**, quantifies them, shows the evidence and recommends a corrective action.
 
-> **Status: milestone 1 — deterministic MVP.** All matching and financial calculations are
-> rule-based Python using exact decimal arithmetic. No LLM is used. Sample data is synthetic;
-> the tool has not been validated on real customer data.
+> **Status: deterministic engine with a CLI and a local web app.** All matching and financial
+> calculations are rule-based Python using exact decimal arithmetic. No LLM is used. Sample data is
+> synthetic; the tool has not been validated on real customer or supplier data.
 
 ## What it does
 
@@ -59,6 +59,70 @@ Outputs (in `reports/` by default, git-ignored):
 | `validation_issues.csv` | One row per rejected field/row |
 
 The installed console script `opsresolve` is equivalent to `python -m opsresolve`.
+
+## Local web app
+
+A single-page Streamlit app for running a reconciliation from your browser, reviewing the findings and
+exporting them. It runs **only on your computer**: it listens on `localhost`, sends no usage statistics,
+and uses no database, cloud service or AI model. It calls the same pipeline as the CLI, so results are
+identical for the same files and settings.
+
+### Install and launch (macOS)
+
+```bash
+cd opsresolve-ai
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[app]"            # adds Streamlit; use ".[dev,app]" to also run the tests
+streamlit run app.py
+```
+
+Run the last command from the repository folder so Streamlit picks up `.streamlit/config.toml`.
+It opens `http://localhost:8501` in your browser; stop it with `Ctrl+C` in the terminal.
+
+### Performing a reconciliation
+
+1. **Input files.** Upload the three required CSVs (purchase orders, invoices, goods receipts) and,
+   if your documents state units of measure, the optional unit-conversion file. Each uploader has an
+   *Expected format* panel listing the required and optional columns (see [Input format](#input-format))
+   and a template download with example rows. To try it out, choose **Use bundled sample data**.
+2. **Rule settings** (sidebar). Tolerances, duplicate window and severity thresholds. Defaults are strict,
+   or come from `OPSRESOLVE_*` environment variables as for the CLI.
+3. **Run reconciliation.** The button is enabled once all required files are present.
+
+### Reviewing and exporting findings
+
+- **Summary:** rows read per file (accepted and rejected), the number of validation issues and
+  exceptions, counts by severity and type, and a processing status. "No exceptions" means the documents
+  agree under the current rules; it is not an approval or payment decision.
+- **Exceptions:** filter by severity and type, search by PO, SKU, supplier, invoice or GRN number, and
+  inspect one finding: expected vs actual, amount impact, recommended next step, the evidence rows
+  (with CSV line numbers) and every note from the engine. Possible duplicates are alerts for human
+  review, not confirmed duplicates.
+- **Validation issues:** shown separately, with the uploaded file name, line, field, value and problem.
+  These rows were rejected and excluded from matching; correct them before relying on the findings.
+- **Downloads:** exceptions CSV, validation-issues CSV and the Markdown summary report, generated from
+  the current run. In the CSV downloads, cells that would start a spreadsheet formula (`=`, `+`, `-`, `@`,
+  tab, carriage return) are prefixed with `'` so spreadsheets show them as text; plain numbers such as
+  `-50.00` are unchanged. (The CLI's report files are not altered.)
+
+Changing any upload or setting clears the previous results, so what you see always matches the
+current inputs.
+
+### Data handling
+
+Uploaded files are written under fixed names (never their uploaded names) to a temporary folder that is
+deleted as soon as the run finishes, including when it fails. Results are kept only in memory for your
+browser session; there is no upload history. Streamlit itself holds uploaded files in memory until you
+remove them or close the tab. Uploads are limited to 20 MB and `.csv` files.
+
+### Web app limitations
+
+- Same engine limitations as the CLI (see [Evaluation](#evaluation) and the roadmap below); **the app
+  has not been validated on real supplier data**, and its findings need human review.
+- Single user, local only: no login, sharing, saved runs or status tracking of exceptions.
+- Files must use the column names above; there is no column mapping for ERP exports.
+- Tested with Streamlit 1.50 and 1.65 on Linux (Python 3.10 and 3.14); please confirm on your Mac.
 
 ## Configuration
 
@@ -204,7 +268,10 @@ covered by the unit tests), uses one currency for prices, and measures only the 
 ## Project layout
 
 ```
-src/opsresolve/   models, config, ingestion, matching, detection, pipeline, reporting, cli, evaluation
+src/opsresolve/   models, config, ingestion, matching, uom, detection, pipeline, reporting, cli,
+                  evaluation, webapp (helpers for the web app)
+app.py            Streamlit web app (layout only; see "Local web app")
+.streamlit/       local-only Streamlit settings (localhost, no telemetry)
 data/sample/      synthetic CSVs + README listing every seeded scenario and expected result
 data/evaluation/  labelled evaluation dataset: inputs, scenarios.csv, expected_exceptions.csv
 tests/            unit and end-to-end tests

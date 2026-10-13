@@ -41,7 +41,8 @@ jobs:
       - name: Install project
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          # The app extra (Streamlit) is installed so the web-app UI tests run instead of being skipped.
+          python -m pip install -e ".[dev,app]"
 
       - name: Run tests
         run: python -m pytest
