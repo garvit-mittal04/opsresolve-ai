@@ -91,14 +91,71 @@ currency is a 3-letter ISO code.
 pytest
 ```
 
-GitHub Actions runs the same suite on every push and pull request to `main`, on Python 3.10 and 3.14
-(see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+GitHub Actions runs the same suite on every push and pull request to `main`, on Python 3.10 and 3.14,
+then prints the evaluation report to the run summary (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+
+## Evaluation
+
+OpsResolve is measured against a labelled synthetic dataset in [`data/evaluation/`](data/evaluation/):
+32 scenarios (34 PO lines, 39 invoice lines, 34 receipt lines) and a hand-computed answer key of
+33 expected exceptions covering every exception type.
+
+```bash
+python -m opsresolve.evaluation                              # print the report
+python -m opsresolve.evaluation --output reports/evaluation.md
+pytest tests/test_evaluation.py                              # metric, matching and dataset tests
+```
+
+**Dataset.** `scenarios.csv` lists each scenario (ID, category, its PO numbers, description, and whether it
+is a *known limitation*). `expected_exceptions.csv` is the answer key: exception type, PO, SKU, expected
+amount impact and (where the rules define one) quantity difference, with the arithmetic in `rationale`.
+Every PO number belongs to exactly one scenario. Scenarios cover exact matches, partial deliveries and
+split billing, price, quantity, supplier and currency mismatches, missing PO / receipt / invoice,
+duplicate invoices, and lines with several simultaneous discrepancies. All parties are fictional
+(`Synthetic Supplier E01` ... `E11`).
+
+**Ground truth.** The answer key records what a careful reviewer should conclude about each scenario,
+not what the engine currently outputs. Three scenarios are deliberately marked `known_limitation`
+because the documented rules are expected to get them wrong: a duplicate re-sent outside the 30-day
+window (S26), a legitimate second invoice whose goods receipt is not yet posted (S27), and a
+unit-of-measure difference that the engine does not convert (S32).
+
+**Definitions.**
+
+- An exception is matched on `(exception_type, po_number, sku)`. Within a key, predictions and
+  expectations are paired as multisets (exact-amount pairs first).
+- **TP**: a prediction paired with an expected exception. **FP**: an unpaired prediction (including any
+  prediction not attributable to a scenario). **FN**: an unpaired expected exception.
+- Precision = TP / (TP + FP), recall = TP / (TP + FN), F1 = 2PR / (P + R). Overall figures are micro-averaged;
+  the report also breaks them down by exception type and by scenario.
+- A zero denominator makes a metric **undefined**, reported as `n/a` (never as 0 or 1). F1 is `n/a` if either
+  input is undefined and 0 if both are 0.
+- Amount accuracy is reported separately: a TP counts as exact only if its amount impact (and quantity
+  difference, where the key gives one) equals the answer key exactly.
+- True negatives are not counted. Clean scenarios are instead checked to produce no exceptions.
+
+**Current results** (default rules, measured by `python -m opsresolve.evaluation`):
+
+| TP | FP | FN | Precision | Recall | F1 | Exact amounts | Scenarios fully correct |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 | 3 | 1 | 0.914 | 0.970 | 0.941 | 32 / 32 | 29 / 32 |
+
+All misses are the three known-limitation scenarios: one missed duplicate (S26) and three false positives
+(a duplicate in S27, and a quantity plus a price mismatch in S32). `tests/test_evaluation.py` pins these
+numbers, so any change in detection behaviour fails CI until the change and the documented results are
+reviewed together.
+
+**Limitations.** These numbers measure agreement with scenarios written by the same team that wrote
+the rules, on a small, clean, synthetic dataset. They are **not** an estimate of accuracy on real
+supplier data, which has not been evaluated. The dataset contains no invalid rows (input validation is
+covered by the unit tests), uses one currency for prices, and measures only the default configuration.
 
 ## Project layout
 
 ```
-src/opsresolve/   models, config, ingestion, matching, detection, pipeline, reporting, cli
+src/opsresolve/   models, config, ingestion, matching, detection, pipeline, reporting, cli, evaluation
 data/sample/      synthetic CSVs + README listing every seeded scenario and expected result
+data/evaluation/  labelled evaluation dataset: inputs, scenarios.csv, expected_exceptions.csv
 tests/            unit and end-to-end tests
 docs/             architecture and validation plan
 CLAUDE.md         persistent project instructions for contributors and AI assistants
@@ -106,7 +163,7 @@ CLAUDE.md         persistent project instructions for contributors and AI assist
 
 ## Roadmap (not yet built)
 
-- Larger generated datasets with an answer key; measured detection precision/recall
+- Larger and more varied evaluation datasets, and evaluation on anonymised real exports
 - Units of measure, FX conversion, tax/freight lines, credit notes, returns and PO amendments
 - Adapters for real ERP exports
 - Persistent exception tracking (status, owner, resolution)

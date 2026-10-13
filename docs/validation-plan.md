@@ -18,6 +18,7 @@ How we establish that OpsResolve is correct, and what has **not** yet been valid
 | `tests/test_matching.py` | partial receipts and split invoices; unmatched records; key is (PO, SKU) not SKU alone |
 | `tests/test_detection.py` | each rule's trigger and non-trigger; amount and sign; severity; tolerances (inclusive boundaries); fractional quantities and rounding; currency mismatch skipping price check; missing-record notes for rejected rows; each duplicate rule including false-positive guards (split billing, outside window, different supplier); determinism and ordering |
 | `tests/test_config.py` | strict defaults; env overrides; invalid env values rejected |
+| `tests/test_evaluation.py` | metric arithmetic and zero denominators; TP/FP/FN matching (multisets, amount pairing, unattributed predictions); answer-key and scenario validation; evaluation dataset integrity (valid inputs, every PO owned by one scenario, all exception types covered, synthetic parties only); measured results pinned; reproducible report; CLI |
 | `tests/test_end_to_end.py` | full pipeline on `data/sample`: exact validation issues, exact exception counts per type, hand-computed amounts, clean lines unflagged, report rendering, CSV round-trip, CLI exit codes |
 
 Rule for expected values: they are computed by hand from the scenario description
@@ -39,7 +40,9 @@ returned the suite to green.
 
 - **No real customer data has been processed and no customer has validated the output.**
   All data is synthetic; supplier names are fictional.
-- Precision/recall of duplicate detection on real invoice populations is unknown.
+- Precision/recall are measured only on the synthetic evaluation dataset (`data/evaluation`, see README
+  "Evaluation"): F1 0.941 overall and 0.750 for duplicate detection on 32 scenarios. Accuracy on real
+  invoice populations is unknown.
 - Default tolerances and severity thresholds are placeholders, not tuned to any business.
 - Real ERP exports (SAP, NetSuite, Dynamics, etc.) have not been tested: column names, date formats,
   thousands separators, units of measure, multi-line quoted fields and encodings may differ.
@@ -49,6 +52,6 @@ returned the suite to green.
 
 ## 5. Next validation steps
 
-1. Build a larger generated dataset with a known answer key (thousands of lines, randomised scenarios) and measure detection precision/recall.
+1. Grow the evaluation dataset (more scenarios per category, generated variations, non-default tolerances) and keep the answer key hand-derived.
 2. Property-based tests (e.g. Hypothesis) for the arithmetic: impacts are invariant to row order; clean data never yields exceptions.
 3. Pilot on an anonymised real export with a finance user reviewing every exception; record agreed/disagreed outcomes before making any accuracy claims.
