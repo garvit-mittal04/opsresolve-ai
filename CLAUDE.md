@@ -38,8 +38,10 @@ src/opsresolve/
   detection.py   Exception rules, amounts, severity, recommended actions     (pure)
   pipeline.py    Orchestration: ingestion -> matching -> detection
   reporting.py   Markdown / CSV / console rendering                         (no rules)
+  evaluation.py  Scores the pipeline against data/evaluation's answer key    (P/R/F1)
   cli.py         Command-line entry point
 data/sample/     Synthetic CSVs + README describing every seeded scenario
+data/evaluation/ Labelled evaluation dataset (scenarios.csv, expected_exceptions.csv)
 tests/           Pytest suite (unit + end-to-end on sample data)
 docs/            architecture.md, validation-plan.md
 ```
@@ -59,6 +61,9 @@ python -m opsresolve         # run on data/sample, write reports/ (git-ignored)
   expected amounts, and update `docs/architecture.md` (rule table) if behaviour changes.
 - Change sample data → update `data/sample/README.md` and `tests/test_end_to_end.py`.
   Expected values in tests are derived by hand from the scenario, never pasted from output.
+- The evaluation answer key (`data/evaluation/expected_exceptions.csv`) is ground truth written by hand.
+  Never edit it to match engine output or to raise a score. If detection behaviour changes, update the
+  pinned results in `tests/test_evaluation.py` and the README results table in the same change.
 - Output ordering and exception IDs must stay deterministic (same input → same report).
 - CI (`.github/workflows/ci.yml`) runs `pytest` on Python 3.10 and 3.14 for pushes and PRs to `main`;
   keep it green, and keep its permissions read-only and its actions pinned to commit SHAs.

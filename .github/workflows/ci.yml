@@ -45,3 +45,8 @@ jobs:
 
       - name: Run tests
         run: python -m pytest
+
+      # Prints precision/recall/F1 on the synthetic evaluation dataset to the log and the run summary.
+      # pytest (tests/test_evaluation.py) is what gates on the measured results.
+      - name: Run evaluation
+        run: python -m opsresolve.evaluation --output "$GITHUB_STEP_SUMMARY"

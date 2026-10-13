@@ -1,0 +1,33 @@
+scenario_id,category,po_numbers,known_limitation,description
+S01,exact_match,4600000101,false,Single-line PO received and invoiced exactly at PO quantity and price
+S02,exact_match,4600000201,false,Two-line PO; one receipt and one invoice both matching every line
+S03,partial_delivery,4600000301,false,Two partial deliveries (600 + 400) completing the PO; one invoice for 1000
+S04,partial_delivery,4600000401,false,Split billing: two deliveries of 100 and two content-identical invoices of 100 a week apart (legitimate)
+S05,partial_delivery,4600000501,false,Partially delivered open PO (300 of 500) invoiced only for what was received
+S06,exact_match,4600000601,false,Fractional quantity (12.5 kg) received and invoiced exactly
+S07,no_activity,4600000701,false,Open PO with no receipts and no invoices yet
+S08,price_mismatch,4600000801,false,Invoice unit price 26.10 above PO price 25.00 for 40 units
+S09,price_mismatch,4600000901,false,Invoice unit price 1.70 below PO price 1.75 for 300 units
+S10,price_mismatch,4600001001,false,Two-line invoice where only the second line is overpriced (12.60 vs 12.00)
+S11,quantity_mismatch,4600001101,false,250 invoiced but only 240 received
+S12,quantity_mismatch,4600001201,false,80 received but only 75 invoiced (under-billing)
+S13,quantity_mismatch,4600001301,false,Over-delivery: 110 received and invoiced against 100 ordered
+S14,partial_delivery,4600001401,false,Partial delivery (600 of 1000) but invoiced for the full 1000
+S15,supplier_mismatch,4600001501,false,Invoice issued by a different supplier from the one on the PO
+S16,supplier_mismatch,4600001601,false,Goods receipt records a different supplier from the one on the PO
+S17,currency_mismatch,4600001701,false,PO in USD but invoice in EUR
+S18,missing_record,4600001801,false,Invoice with no goods receipt
+S19,missing_record,4600001901,false,Goods receipt with no invoice
+S20,missing_record,4600002001,false,Invoice references a PO number that does not exist
+S21,missing_record,4600002101,false,Invoice adds a SKU that is not on the referenced PO
+S22,missing_record,4600002201,false,Goods receipt references a PO number that does not exist
+S23,duplicate_invoice,4600002301,false,Same invoice re-keyed with a reformatted number (E06-2301 vs E06/02301) five days later
+S24,duplicate_invoice,4600002401,false,Same bill submitted twice under different numbers three days apart; goods received once
+S25,duplicate_invoice,4600002501,false,Same line entered twice on one invoice
+S26,duplicate_invoice,4600002601,true,Same bill re-sent under a new number 60 days later (outside the 30-day duplicate window)
+S27,duplicate_invoice,4600002701,true,Second delivery arrived and was legitimately invoiced but its goods receipt has not been posted yet
+S28,multiple_discrepancies,4600002801,false,Short receipt (95 of 100) and invoice overpriced (9.45 vs 9.00) on the same line
+S29,multiple_discrepancies,4600002901,false,Over-delivery (55 vs 50 ordered) and invoice overpriced (4.20 vs 4.00)
+S30,multiple_discrepancies,4600003001,false,Invoice from a different supplier at a higher price with no goods receipt
+S31,multiple_discrepancies,4600003101,false,Three-line PO: one clean line; one short-received line; one received but not invoiced
+S32,unit_of_measure,4600003201,true,PO in boxes of 12 (10 x 24.00) but invoice in units (120 x 2.00); same value and no real discrepancy

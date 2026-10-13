@@ -91,6 +91,13 @@ Design notes:
 - Exceptions are sorted by severity, then |amount| descending, then type/PO/SKU, and numbered `EXC-0001…` — the same input always yields the same report.
 - A PO line with no invoices and no receipts is open, not an exception.
 
+## Evaluation
+
+`evaluation.py` runs the unchanged pipeline with default `MatchConfig` on `data/evaluation/` and
+compares its exceptions with the hand-written answer key on `(exception_type, po_number, sku)`.
+It reports TP/FP/FN, precision, recall and F1 overall, by type and by scenario, plus amount accuracy.
+It depends on the pipeline but nothing in the pipeline depends on it. Methodology: README "Evaluation".
+
 ## Configuration
 
 `MatchConfig` (Pydantic, validated) reads `OPSRESOLVE_*` environment variables — see `.env.example`.
