@@ -14,6 +14,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import Enum
 from typing import TYPE_CHECKING, Mapping
 
 from opsresolve.config import MatchConfig
@@ -433,28 +434,52 @@ class _InvoiceHeader:
         return min(line.source_row for line in self.lines)
 
 
-def _billing_exceeds_supply(match: MatchResult, unresolved_units: Mapping | None = None):
-    """Return a predicate: has a PO line been invoiced beyond what was received or ordered?
+class Supply(str, Enum):
+    """What the PO line says about whether an extra identical invoice can be legitimate."""
 
-    Invoice lines with no PO line, or whose units could not be reconciled, are
-    treated as exceeding supply because supply cannot be verified.
+    SUPPORTED = "supported"        # billing within what was received: e.g. split billing
+    OPEN_ON_PO = "open_on_po"      # over received but within ordered: maybe an unposted receipt
+    EXCEEDS_ORDER = "exceeds_order"  # over the ordered quantity: the PO cannot support it
+    UNVERIFIABLE = "unverifiable"  # no PO line, or units could not be reconciled
+
+
+def _supply_evidence(match: MatchResult, unresolved_units: Mapping | None = None):
+    """Return a function classifying a PO line key by the supply evidence for its billing.
+
+    The ordered quantity is the strongest evidence: it is fixed on the PO. Received
+    quantity is weaker because receipts can be posted after the invoice arrives.
     """
     lines = {m.po_line.key: m for m in match.matched}
     unresolved_units = unresolved_units or {}
 
-    def exceeds(key: tuple[str, str]) -> bool:
+    def classify(key: tuple[str, str]) -> Supply:
         line = lines.get(key)
         if line is None or key in unresolved_units:
-            return True
-        return line.total_invoiced > line.total_received or line.total_invoiced > line.po_line.quantity_ordered
+            return Supply.UNVERIFIABLE
+        if line.total_invoiced > line.po_line.quantity_ordered:
+            return Supply.EXCEEDS_ORDER
+        if line.total_invoiced > line.total_received:
+            return Supply.OPEN_ON_PO
+        return Supply.SUPPORTED
 
-    return exceeds
+    return classify
 
 
-def _check_duplicates(invoices: list[InvoiceLine], match: MatchResult, config: MatchConfig,
-                      unresolved_units: Mapping | None = None) -> list[_Draft]:
+def _strongest(evidence: list[Supply]) -> Supply:
+    for level in (Supply.EXCEEDS_ORDER, Supply.UNVERIFIABLE, Supply.OPEN_ON_PO):
+        if level in evidence:
+            return level
+    return Supply.SUPPORTED
+
+
+def _check_duplicates(
+    invoices: list[InvoiceLine], match: MatchResult, config: MatchConfig, unresolved_units: Mapping | None = None
+) -> tuple[list[_Draft], dict[tuple[str, str], list[str]]]:
+    """Return possible-duplicate drafts, plus notes for PO lines where a content-identical
+    invoice could be either a duplicate or a legitimate invoice and is not claimed as either."""
     drafts: list[_Draft] = []
-    exceeds_supply = _billing_exceeds_supply(match, unresolved_units)
+    pending: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)  # key -> (later invoice, note)
+    supply = _supply_evidence(match, unresolved_units)
     groups: dict[tuple[str, str], list[InvoiceLine]] = defaultdict(list)
     for inv in invoices:
         groups[(inv.supplier_id, inv.invoice_number)].append(inv)
@@ -501,11 +526,27 @@ def _check_duplicates(invoices: list[InvoiceLine], match: MatchResult, config: M
                     reasons.append(f"invoice numbers '{earlier.invoice_number}' and '{later.invoice_number}' "
                                    f"differ only in formatting")
                 days_apart = abs((later.invoice_date - earlier.invoice_date).days)
-                # Identical content alone can be legitimate split billing, so it only counts when
-                # the combined billing exceeds what was received or ordered.
-                if (earlier.signature == later.signature and days_apart <= config.duplicate_window_days
-                        and any(exceeds_supply(l.key) for l in later.lines)):
-                    reasons.append(f"identical line items, quantities and prices, dated {days_apart} day(s) apart")
+                in_window = days_apart <= config.duplicate_window_days
+                # Identical content alone can be legitimate (split billing, a second delivery), so the
+                # PO line's supply evidence decides what it means.
+                if earlier.signature == later.signature:
+                    evidence = _strongest([supply(l.key) for l in later.lines])
+                    identical = f"identical line items, quantities and prices, dated {days_apart} day(s) apart"
+                    if evidence is Supply.EXCEEDS_ORDER:
+                        # The PO cannot support both invoices, however far apart they are.
+                        reasons.append(identical if in_window else
+                                       f"{identical} (outside the {config.duplicate_window_days}-day window, "
+                                       f"but combined billing exceeds the ordered quantity)")
+                    elif evidence is Supply.UNVERIFIABLE and in_window:
+                        reasons.append(identical)
+                    elif evidence is Supply.OPEN_ON_PO and in_window and not reasons:
+                        for line in later.lines:
+                            pending[line.key].append((later.invoice_number,
+                                f"Invoice {later.invoice_number} has the same line items as invoice "
+                                f"{earlier.invoice_number} ({days_apart} day(s) apart). The PO still has "
+                                f"unreceived quantity to cover it, so it may be for a delivery whose goods "
+                                f"receipt is not yet posted, or a duplicate: confirm the receipt before paying. "
+                                f"It is not flagged as a duplicate because the records cannot tell these apart."))
                 if not reasons:
                     continue
                 impact = round_money(later.total)
@@ -528,8 +569,12 @@ def _check_duplicates(invoices: list[InvoiceLine], match: MatchResult, config: M
                                         f"supplier statement; if they are the same bill, reject the later one."),
                     notes=["Duplicates are flagged as *possible*; a person must confirm against the source document."],
                 ))
+                # Flagged after all (e.g. against another earlier invoice): drop its ambiguity notes.
+                for notes in pending.values():
+                    notes[:] = [(number, note) for number, note in notes if number != later.invoice_number]
                 break  # report each later invoice once, against its earliest match
-    return drafts
+    ambiguous = {key: [note for _, note in notes] for key, notes in pending.items() if notes}
+    return drafts, ambiguous
 
 
 # --------------------------------------------------------------------------- #
@@ -548,6 +593,13 @@ def _link_duplicates(drafts: list[_Draft], duplicate_drafts: list[_Draft]) -> No
         if involved:
             draft.notes.append(f"Invoice(s) {', '.join(involved)} are also flagged as possible duplicates; "
                                f"resolve that exception first, as it may explain this one.")
+
+
+def _note_ambiguous_duplicates(drafts: list[_Draft], ambiguous: Mapping[tuple[str, str], list[str]]) -> None:
+    """Attach unresolved-duplicate notes to the exceptions that already hold the line's payment."""
+    for draft in drafts:
+        if draft.exception_type in (ExceptionType.QUANTITY_MISMATCH, ExceptionType.MISSING_GOODS_RECEIPT):
+            draft.notes.extend(ambiguous.get((draft.po_number or "", draft.sku or ""), []))
 
 
 def detect_exceptions(
@@ -573,8 +625,9 @@ def detect_exceptions(
         drafts += _check_invoice_lines(line, config, compare_prices=unit_issue is None)
         drafts += _check_receipt_suppliers(line)
     drafts += _check_unmatched(match, config, rejected)
-    duplicate_drafts = _check_duplicates(all_invoices, match, config, unit_issues)
+    duplicate_drafts, ambiguous = _check_duplicates(all_invoices, match, config, unit_issues)
     _link_duplicates(drafts, duplicate_drafts)
+    _note_ambiguous_duplicates(drafts, ambiguous)
     drafts += duplicate_drafts
 
     drafts.sort(key=lambda d: (

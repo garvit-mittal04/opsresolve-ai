@@ -82,14 +82,20 @@ Tolerances are inclusive (difference equal to the tolerance is *not* an exceptio
 | `MISSING_PURCHASE_ORDER` | invoice line with no PO line | – | invoice line amount | by amount, min MEDIUM |
 | `MISSING_PURCHASE_ORDER` | receipt line with no PO line | received qty | 0 (receipts carry no price) | MEDIUM |
 | `POSSIBLE_DUPLICATE_INVOICE` | same invoice number repeats an identical line | qty × (n−1) | line amount × (n−1) | by amount, min MEDIUM |
-| `POSSIBLE_DUPLICATE_INVOICE` | two invoice numbers from one supplier where (a) numbers are equal after normalisation, or (b) line content is identical, dated within the window, **and** combined billing exceeds received or ordered qty | – | later invoice total | by amount, min MEDIUM |
+| `POSSIBLE_DUPLICATE_INVOICE` | two invoice numbers from one supplier where (a) numbers are equal after normalisation, or (b) line content is identical **and** either combined billing exceeds the **ordered** qty (any date gap), or the PO line is missing / its units unresolved and the invoices are within the window | – | later invoice total | by amount, min MEDIUM |
 
 Severity by amount (absolute value): ≥ 1,000.00 → HIGH; ≥ 100.00 → MEDIUM; else LOW (configurable).
 
 Design notes:
 
 - **Billing quantity impact uses the PO price** so that a price variance on the same line is not counted twice; it is reported separately.
-- **Content-identical invoices alone are not flagged** — split billing (two identical invoices for two identical deliveries) is legitimate. Rule (b) requires evidence of over-billing. Rule (a) (re-keyed invoice number such as `CIB-7781` vs `CIB-07781`) is flagged regardless.
+- **Content-identical invoices alone are not flagged.** Rule (b) classifies the PO line's supply evidence
+  (`detection.Supply`): billing over the ordered quantity is strong evidence (the PO cannot support both
+  invoices, so the date gap does not matter); billing over received but within ordered is ambiguous, because
+  receipts can be posted late, so it is **not** claimed as a duplicate and instead adds a note to the line's
+  `QUANTITY_MISMATCH` / `MISSING_GOODS_RECEIPT` (within the window); billing covered by receipts is split
+  billing. With no PO line or unresolved units the ordered quantity is unknown and the windowed rule applies.
+  Rule (a) (re-keyed invoice number such as `CIB-7781` vs `CIB-07781`) is flagged regardless.
 - Each later invoice is reported once, against its earliest match.
 - A duplicate invoice also inflates the billed quantity, so the same money can appear in a duplicate exception and a quantity exception. Such exceptions are cross-referenced with a note, and the report warns that amounts must not be summed across types.
 - Exceptions are sorted by severity, then |amount| descending, then type/PO/SKU, and numbered `EXC-0001…` — the same input always yields the same report.

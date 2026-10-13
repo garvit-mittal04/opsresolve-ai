@@ -24,8 +24,8 @@ S22,missing_record,4600002201,false,Goods receipt references a PO number that do
 S23,duplicate_invoice,4600002301,false,Same invoice re-keyed with a reformatted number (E06-2301 vs E06/02301) five days later
 S24,duplicate_invoice,4600002401,false,Same bill submitted twice under different numbers three days apart; goods received once
 S25,duplicate_invoice,4600002501,false,Same line entered twice on one invoice
-S26,duplicate_invoice,4600002601,true,Same bill re-sent under a new number 60 days later (outside the 30-day duplicate window)
-S27,duplicate_invoice,4600002701,true,Second delivery arrived and was legitimately invoiced but its goods receipt has not been posted yet
+S26,duplicate_invoice,4600002601,false,Same bill re-sent under a new number 60 days later (outside the 30-day duplicate window)
+S27,duplicate_invoice,4600002701,false,Second delivery arrived and was legitimately invoiced but its goods receipt has not been posted yet
 S28,multiple_discrepancies,4600002801,false,Short receipt (95 of 100) and invoice overpriced (9.45 vs 9.00) on the same line
 S29,multiple_discrepancies,4600002901,false,Over-delivery (55 vs 50 ordered) and invoice overpriced (4.20 vs 4.00)
 S30,multiple_discrepancies,4600003001,false,Invoice from a different supplier at a higher price with no goods receipt
@@ -34,3 +34,4 @@ S32,unit_of_measure,4600003201,false,PO in boxes of 12 (10 x 24.00) but invoice 
 S33,unit_of_measure,4600003301,false,PO and receipt in CASE but invoice in EA with no conversion known for the SKU; quantities and prices cannot be compared
 S34,unit_of_measure,4600003401,false,Box size differs by SKU: 4 BOX of 6 invoiced as 24 EA at 5.00 (a box of 12 for another SKU must not be assumed)
 S35,unit_of_measure,4600003501,false,Invoice in EA (240 x 2.10) against PO in CASE of 24 (10 x 48.00); quantity agrees after conversion but price is 2.10 vs 2.00 per EA
+S36,duplicate_invoice,4600003601,true,Same bill re-sent under a new number four days later on a half-delivered PO (only one delivery ever made); the records look exactly like legitimate S27
