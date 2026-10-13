@@ -14,6 +14,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import TYPE_CHECKING, Mapping
 
 from opsresolve.config import MatchConfig
 from opsresolve.matching import MatchedLine, MatchResult
@@ -26,6 +27,9 @@ from opsresolve.models import (
     Severity,
     round_money,
 )
+
+if TYPE_CHECKING:  # uom imports this module, so only import its types for annotations
+    from opsresolve.uom import UnitIssue
 
 ZERO = Decimal("0")
 
@@ -86,19 +90,29 @@ def severity_for_amount(amount: Decimal, config: MatchConfig, minimum: Severity 
     return max(level, minimum, key=order.index)
 
 
+def _with_unit(quantity: Decimal, uom: str | None) -> str:
+    """Quantity text; the unit is shown only when the source data states one."""
+    return f"{fmt_qty(quantity)} {uom}" if uom else fmt_qty(quantity)
+
+
+def _converted(record) -> str:
+    return f" [{record.converted_from}]" if record.converted_from else ""
+
+
 def _invoice_evidence(inv: InvoiceLine) -> Evidence:
     return Evidence(
         source="invoices", reference=inv.invoice_number, source_row=inv.source_row,
         detail=(f"Invoice {inv.invoice_number} dated {inv.invoice_date}: "
-                f"{fmt_qty(inv.quantity_invoiced)} x {inv.unit_price} {inv.currency} "
-                f"= {fmt_money(inv.line_amount, inv.currency)}"),
+                f"{_with_unit(inv.quantity_invoiced, inv.unit_of_measure)} x {inv.unit_price} {inv.currency} "
+                f"= {fmt_money(inv.line_amount, inv.currency)}{_converted(inv)}"),
     )
 
 
 def _receipt_evidence(grn: GoodsReceiptLine) -> Evidence:
     return Evidence(
         source="goods_received", reference=grn.grn_number, source_row=grn.source_row,
-        detail=f"GRN {grn.grn_number} dated {grn.received_date}: {fmt_qty(grn.quantity_received)} received",
+        detail=(f"GRN {grn.grn_number} dated {grn.received_date}: "
+                f"{_with_unit(grn.quantity_received, grn.unit_of_measure)} received{_converted(grn)}"),
     )
 
 
@@ -107,7 +121,8 @@ def _po_evidence(line: MatchedLine) -> Evidence:
     return Evidence(
         source="purchase_orders", reference=po.po_number, source_row=po.source_row,
         detail=(f"PO {po.po_number} line {po.line_number} ({po.supplier_name}): "
-                f"{fmt_qty(po.quantity_ordered)} x {po.unit_price} {po.currency} ordered on {po.order_date}"),
+                f"{_with_unit(po.quantity_ordered, po.unit_of_measure)} x {po.unit_price} {po.currency} "
+                f"ordered on {po.order_date}"),
     )
 
 
@@ -115,7 +130,9 @@ def _po_evidence(line: MatchedLine) -> Evidence:
 # PO-line level rules
 # --------------------------------------------------------------------------- #
 
-def _check_missing_documents(line: MatchedLine, config: MatchConfig, rejected: RejectedKeys) -> list[_Draft]:
+def _check_missing_documents(line: MatchedLine, config: MatchConfig, rejected: RejectedKeys,
+                             units_resolved: bool = True) -> list[_Draft]:
+    """Missing receipt / invoice. With unresolved units, quantities are not summed or valued."""
     po = line.po_line
     drafts: list[_Draft] = []
 
@@ -126,10 +143,11 @@ def _check_missing_documents(line: MatchedLine, config: MatchConfig, rejected: R
             severity=severity_for_amount(invoiced_value, config),
             supplier_id=po.supplier_id, po_number=po.po_number, sku=po.sku,
             summary=(f"{fmt_qty(line.total_invoiced)} units invoiced for PO {po.po_number} / {po.sku} "
-                     f"but no goods receipt is recorded."),
+                     f"but no goods receipt is recorded." if units_resolved else
+                     f"Invoiced for PO {po.po_number} / {po.sku} but no goods receipt is recorded."),
             expected="Goods receipt for invoiced quantity",
             actual="No goods receipt found",
-            quantity_difference=line.total_invoiced,
+            quantity_difference=line.total_invoiced if units_resolved else None,
             amount_impact=round_money(invoiced_value), currency=po.currency,
             evidence=[_po_evidence(line), *map(_invoice_evidence, line.invoices)],
             recommended_action=("Hold payment for the invoiced amount. Confirm with the receiving location "
@@ -141,21 +159,24 @@ def _check_missing_documents(line: MatchedLine, config: MatchConfig, rejected: R
         drafts.append(draft)
 
     if line.receipts and not line.invoices:
-        received_value = line.total_received * po.unit_price
+        received_value = line.total_received * po.unit_price if units_resolved else ZERO
         draft = _Draft(
             exception_type=ExceptionType.MISSING_INVOICE,
             severity=Severity.LOW,
             supplier_id=po.supplier_id, po_number=po.po_number, sku=po.sku,
             summary=(f"{fmt_qty(line.total_received)} units received for PO {po.po_number} / {po.sku} "
-                     f"but no invoice is recorded."),
+                     f"but no invoice is recorded." if units_resolved else
+                     f"Goods received for PO {po.po_number} / {po.sku} but no invoice is recorded."),
             expected="Supplier invoice for received quantity",
             actual="No invoice found",
-            quantity_difference=line.total_received,
+            quantity_difference=line.total_received if units_resolved else None,
             amount_impact=round_money(received_value), currency=po.currency,
             evidence=[_po_evidence(line), *map(_receipt_evidence, line.receipts)],
             recommended_action=("No payment risk. Accrue the received value at PO price and follow up with "
                                 "the supplier if the invoice is overdue under the agreed terms."),
-            notes=["Amount shown is the received value at PO unit price (an accrual estimate), not an overpayment."],
+            notes=["Amount shown is the received value at PO unit price (an accrual estimate), not an overpayment."
+                   if units_resolved else
+                   "Not valued: the receipt's unit of measure could not be converted to the PO unit."],
         )
         if po.key in rejected.invoices:
             draft.notes.append(_REJECTED_NOTE.format(file="invoices", po=po.po_number, sku=po.sku))
@@ -220,7 +241,7 @@ def _check_quantities(line: MatchedLine, config: MatchConfig) -> list[_Draft]:
     return drafts
 
 
-def _check_invoice_lines(line: MatchedLine, config: MatchConfig) -> list[_Draft]:
+def _check_invoice_lines(line: MatchedLine, config: MatchConfig, compare_prices: bool = True) -> list[_Draft]:
     po = line.po_line
     drafts: list[_Draft] = []
     for inv in line.invoices:
@@ -252,21 +273,24 @@ def _check_invoice_lines(line: MatchedLine, config: MatchConfig) -> list[_Draft]
                 notes=["No currency conversion is performed, so no amount impact is calculated."],
             ))
             continue  # prices in different currencies are not comparable
+        if not compare_prices:
+            continue  # prices in unconverted units are not comparable (UNIT_OF_MEASURE_MISMATCH)
 
         price_difference = inv.unit_price - po.unit_price
         allowed = max(config.price_tolerance_abs, po.unit_price * config.price_tolerance_pct / Decimal(100))
         if abs(price_difference) > allowed:
             impact = round_money(price_difference * inv.quantity_invoiced)
             overcharged = price_difference > 0
+            per = f" per {po.unit_of_measure}" if po.unit_of_measure else ""
             drafts.append(_Draft(
                 exception_type=ExceptionType.PRICE_MISMATCH,
                 severity=severity_for_amount(impact, config) if overcharged else Severity.LOW,
                 supplier_id=inv.supplier_id, po_number=po.po_number, sku=po.sku,
-                summary=(f"Invoice {inv.invoice_number} unit price {inv.unit_price} {inv.currency} "
+                summary=(f"Invoice {inv.invoice_number} unit price {inv.unit_price} {inv.currency}{per} "
                          f"{'is above' if overcharged else 'is below'} PO price {po.unit_price} "
-                         f"{po.currency} for {po.sku}."),
-                expected=f"Unit price {po.unit_price} {po.currency}",
-                actual=f"Unit price {inv.unit_price} {inv.currency}",
+                         f"{po.currency}{per} for {po.sku}."),
+                expected=f"Unit price {po.unit_price} {po.currency}{per}",
+                actual=f"Unit price {inv.unit_price} {inv.currency}{per}",
                 quantity_difference=None,
                 amount_impact=impact, currency=inv.currency,
                 evidence=[_po_evidence(line), _invoice_evidence(inv)],
@@ -279,6 +303,27 @@ def _check_invoice_lines(line: MatchedLine, config: MatchConfig) -> list[_Draft]
                     "difference is not re-billed later."),
                 ))
     return drafts
+
+
+def _unit_mismatch(line: MatchedLine, issue: "UnitIssue") -> _Draft:
+    po = line.po_line
+    return _Draft(
+        exception_type=ExceptionType.UNIT_OF_MEASURE_MISMATCH,
+        severity=Severity.MEDIUM,
+        supplier_id=po.supplier_id, po_number=po.po_number, sku=po.sku,
+        summary=(f"Quantities and prices for PO {po.po_number} / {po.sku} could not be compared: "
+                 f"{issue.reason}."),
+        expected=f"All documents in {po.unit_of_measure} or convertible to it" if po.unit_of_measure
+        else "A unit of measure stated on every document",
+        actual="; ".join(issue.document_uoms),
+        amount_impact=ZERO, currency=po.currency,
+        evidence=[_po_evidence(line), *map(_invoice_evidence, line.invoices),
+                  *map(_receipt_evidence, line.receipts)],
+        recommended_action=("Confirm the pack size with the supplier or item master and add a conversion for "
+                            "this SKU to uom_conversions.csv (or correct the unit on the documents), then "
+                            "re-run. Do not pay on this line until its quantity and price are checked."),
+        notes=["No quantity or price comparison was made for this line, so no amount impact is calculated."],
+    )
 
 
 def _check_receipt_suppliers(line: MatchedLine) -> list[_Draft]:
@@ -388,25 +433,28 @@ class _InvoiceHeader:
         return min(line.source_row for line in self.lines)
 
 
-def _billing_exceeds_supply(match: MatchResult):
+def _billing_exceeds_supply(match: MatchResult, unresolved_units: Mapping | None = None):
     """Return a predicate: has a PO line been invoiced beyond what was received or ordered?
 
-    Invoice lines with no PO line are treated as exceeding supply.
+    Invoice lines with no PO line, or whose units could not be reconciled, are
+    treated as exceeding supply because supply cannot be verified.
     """
     lines = {m.po_line.key: m for m in match.matched}
+    unresolved_units = unresolved_units or {}
 
     def exceeds(key: tuple[str, str]) -> bool:
         line = lines.get(key)
-        if line is None:
+        if line is None or key in unresolved_units:
             return True
         return line.total_invoiced > line.total_received or line.total_invoiced > line.po_line.quantity_ordered
 
     return exceeds
 
 
-def _check_duplicates(invoices: list[InvoiceLine], match: MatchResult, config: MatchConfig) -> list[_Draft]:
+def _check_duplicates(invoices: list[InvoiceLine], match: MatchResult, config: MatchConfig,
+                      unresolved_units: Mapping | None = None) -> list[_Draft]:
     drafts: list[_Draft] = []
-    exceeds_supply = _billing_exceeds_supply(match)
+    exceeds_supply = _billing_exceeds_supply(match, unresolved_units)
     groups: dict[tuple[str, str], list[InvoiceLine]] = defaultdict(list)
     for inv in invoices:
         groups[(inv.supplier_id, inv.invoice_number)].append(inv)
@@ -507,19 +555,25 @@ def detect_exceptions(
     all_invoices: list[InvoiceLine],
     config: MatchConfig | None = None,
     rejected: RejectedKeys | None = None,
+    unit_issues: Mapping[tuple[str, str], "UnitIssue"] | None = None,
 ) -> list[OpsException]:
     """Run every rule and return exceptions in a stable, prioritised order."""
     config = config or MatchConfig()
     rejected = rejected or RejectedKeys()
 
     drafts: list[_Draft] = []
+    unit_issues = unit_issues or {}
     for line in match.matched:
-        drafts += _check_missing_documents(line, config, rejected)
-        drafts += _check_quantities(line, config)
-        drafts += _check_invoice_lines(line, config)
+        unit_issue = unit_issues.get(line.po_line.key)
+        if unit_issue is not None:
+            drafts.append(_unit_mismatch(line, unit_issue))
+        drafts += _check_missing_documents(line, config, rejected, units_resolved=unit_issue is None)
+        if unit_issue is None:
+            drafts += _check_quantities(line, config)
+        drafts += _check_invoice_lines(line, config, compare_prices=unit_issue is None)
         drafts += _check_receipt_suppliers(line)
     drafts += _check_unmatched(match, config, rejected)
-    duplicate_drafts = _check_duplicates(all_invoices, match, config)
+    duplicate_drafts = _check_duplicates(all_invoices, match, config, unit_issues)
     _link_duplicates(drafts, duplicate_drafts)
     drafts += duplicate_drafts
 

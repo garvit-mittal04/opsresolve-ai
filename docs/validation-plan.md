@@ -19,6 +19,7 @@ How we establish that OpsResolve is correct, and what has **not** yet been valid
 | `tests/test_detection.py` | each rule's trigger and non-trigger; amount and sign; severity; tolerances (inclusive boundaries); fractional quantities and rounding; currency mismatch skipping price check; missing-record notes for rejected rows; each duplicate rule including false-positive guards (split billing, outside window, different supplier); determinism and ordering |
 | `tests/test_config.py` | strict defaults; env overrides; invalid env values rejected |
 | `tests/test_evaluation.py` | metric arithmetic and zero denominators; TP/FP/FN matching (multisets, amount pairing, unattributed predictions); answer-key and scenario validation; evaluation dataset integrity (valid inputs, every PO owned by one scenario, all exception types covered, synthetic parties only); measured results pinned; reproducible report; CLI |
+| `tests/test_uom.py` | S32 regression; per-SKU conversions (no assumed pack sizes); discrepancies still found after conversion; receipts and non-base units; missing, partial, inexact and cross-base units → `UNIT_OF_MEASURE_MISMATCH`; other rules on unresolved lines; conversion file validation (invalid, ambiguous, duplicate, missing file/column); unchanged results without units; CLI discovery |
 | `tests/test_end_to_end.py` | full pipeline on `data/sample`: exact validation issues, exact exception counts per type, hand-computed amounts, clean lines unflagged, report rendering, CSV round-trip, CLI exit codes |
 
 Rule for expected values: they are computed by hand from the scenario description
@@ -41,13 +42,14 @@ returned the suite to green.
 - **No real customer data has been processed and no customer has validated the output.**
   All data is synthetic; supplier names are fictional.
 - Precision/recall are measured only on the synthetic evaluation dataset (`data/evaluation`, see README
-  "Evaluation"): F1 0.941 overall and 0.750 for duplicate detection on 32 scenarios. Accuracy on real
+  "Evaluation"): F1 0.971 overall and 0.750 for duplicate detection on 35 scenarios. Accuracy on real
   invoice populations is unknown.
 - Default tolerances and severity thresholds are placeholders, not tuned to any business.
 - Real ERP exports (SAP, NetSuite, Dynamics, etc.) have not been tested: column names, date formats,
   thousands separators, units of measure, multi-line quoted fields and encodings may differ.
 - Performance on large files has not been measured.
-- Not covered by rules yet: units-of-measure conversion, FX conversion, tax/freight/discount lines,
+- Unit-of-measure conversion is per SKU only; supplier-specific pack sizes and real item-master data are untested.
+- Not covered by rules yet: FX conversion, tax/freight/discount lines,
   credit notes, returns, PO amendments, invoice-level header totals.
 
 ## 5. Next validation steps

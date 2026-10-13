@@ -45,6 +45,9 @@ All quantities and money are `Decimal`. Dates must be ISO `YYYY-MM-DD` (no ambig
 | `purchase_orders.csv` | po_number, line_number, supplier_id, supplier_name, sku, quantity_ordered (>0), unit_price (>=0), currency, order_date (`description` optional) | (po_number, line_number) and (po_number, sku) unique |
 | `invoices.csv` | invoice_number, invoice_date, supplier_id, po_number, sku, quantity_invoiced (>0), unit_price (>=0), currency | none enforced — repeats are a *business* exception |
 | `goods_received.csv` | grn_number, received_date, supplier_id, po_number, sku, quantity_received (>=0) | (grn_number, po_number, sku) unique |
+| `uom_conversions.csv` (optional) | sku, uom, base_uom, units_per_uom (>0) | (sku, uom) unique and unambiguous |
+
+All three document files accept an optional `unit_of_measure` column.
 
 ### Validation behaviour
 
@@ -71,6 +74,7 @@ Tolerances are inclusive (difference equal to the tolerance is *not* an exceptio
 | `QUANTITY_MISMATCH` (over-receipt) | Σreceived − ordered > qty tolerance | Σreceived − ordered | excess × PO unit price | by amount |
 | `PRICE_MISMATCH` | per invoice line, same currency, \|inv price − PO price\| > max(abs tol, PO price × pct tol) | – | (inv price − PO price) × invoiced qty | by amount if overcharged; LOW if under |
 | `CURRENCY_MISMATCH` | invoice currency ≠ PO currency (price check skipped) | – | 0 (no FX conversion) | MEDIUM |
+| `UNIT_OF_MEASURE_MISMATCH` | units stated on the PO line cannot be safely converted (see below); quantity and price checks skipped | – | 0 | MEDIUM |
 | `SUPPLIER_MISMATCH` | invoice supplier ≠ PO supplier | – | invoice line amount | HIGH |
 | `SUPPLIER_MISMATCH` | GRN supplier ≠ PO supplier | – | 0 | MEDIUM |
 | `MISSING_GOODS_RECEIPT` | PO line invoiced, nothing received | Σinvoiced | Σ invoice line amounts | by amount |
@@ -97,6 +101,23 @@ Design notes:
 compares its exceptions with the hand-written answer key on `(exception_type, po_number, sku)`.
 It reports TP/FP/FN, precision, recall and F1 overall, by type and by scenario, plus amount accuracy.
 It depends on the pipeline but nothing in the pipeline depends on it. Methodology: README "Evaluation".
+
+## Units of measure
+
+`uom.py` runs between matching and detection (`pipeline.investigate`). Documents may carry an optional
+`unit_of_measure`; conversions come only from an optional per-SKU table (`uom_conversions.csv`:
+`sku, uom, base_uom, units_per_uom`).
+
+- No unit on any document of a PO line → the line is left untouched (pre-UoM behaviour).
+- Otherwise every invoice and receipt line is converted into the PO line's unit, as
+  `quantity × size(from) / size(to)` and `price × size(to) / size(from)`, where sizes are in the SKU's base unit.
+  The converted record keeps a `converted_from` description that the evidence shows.
+- The line is *unresolved* (→ `UNIT_OF_MEASURE_MISMATCH`) if a document states no unit, no conversion links
+  the units for that SKU through one base unit, or a result is not an exact decimal. Unresolved lines skip
+  quantity and price rules; a missing invoice there is not valued, and for duplicate detection their supply
+  counts as unverified.
+- Ingestion rejects invalid conversion rows (non-positive size, bad unit code, a base unit with size ≠ 1)
+  and treats conflicting rows for one `(sku, uom)` as ambiguous, rejecting all of them.
 
 ## Configuration
 

@@ -327,6 +327,8 @@ def evaluate_dataset(dataset_dir: str | Path = DEFAULT_DATASET_DIR) -> Evaluatio
         dataset_dir / "invoices.csv",
         dataset_dir / "goods_received.csv",
         MatchConfig(),
+        uom_conversions_path=(dataset_dir / "uom_conversions.csv"
+                              if (dataset_dir / "uom_conversions.csv").exists() else None),
     )
     result = compare(expected, run.exceptions, scenarios)
     result.validation_issues = run.dataset.issues
@@ -439,8 +441,8 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m opsresolve.evaluation",
         description="Score exception detection against the labelled synthetic evaluation dataset.")
     parser.add_argument("--dataset-dir", type=Path, default=DEFAULT_DATASET_DIR,
-                        help="Directory with the three input CSVs, scenarios.csv and expected_exceptions.csv "
-                             "(default: data/evaluation).")
+                        help="Directory with the three input CSVs, scenarios.csv, expected_exceptions.csv and "
+                             "optionally uom_conversions.csv (default: data/evaluation).")
     parser.add_argument("--output", type=Path, help="Also write the Markdown report to this file.")
     args = parser.parse_args(argv)
 

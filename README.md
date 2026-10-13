@@ -85,6 +85,30 @@ No API keys or secrets are needed for milestone 1. Never commit `.env`.
 Dates are `YYYY-MM-DD`; numbers use `.` as the decimal separator with no thousands separators;
 currency is a 3-letter ISO code.
 
+### Units of measure (optional)
+
+Each of the three files may have a `unit_of_measure` column (a code such as `EA`, `BOX`, `CASE`, `KG`;
+case-insensitive). Conversions are supplied per SKU in an optional `uom_conversions.csv`, picked up from
+`--data-dir` or given with `--uom-conversions`:
+
+| Column | Meaning |
+|---|---|
+| `sku`, `uom`, `base_uom`, `units_per_uom` | one `uom` of this SKU equals `units_per_uom` of `base_uom` (e.g. `EV-AE,BOX,EA,12`) |
+
+Rules (see `src/opsresolve/uom.py`):
+
+- If no document on a PO line states a unit, nothing changes: quantities and prices are compared as before.
+- If any document on a PO line states a unit, invoice and receipt quantities and prices are converted into the
+  PO line's unit, but only when every document states a unit, a conversion for **that SKU** links the
+  two units through the same base unit, and the result is an exact decimal. No pack size is assumed or
+  read from descriptions, and nothing is rounded.
+- Otherwise the line gets a `UNIT_OF_MEASURE_MISMATCH` exception (MEDIUM, no amount) and its quantity and
+  price checks are skipped, just as prices in different currencies are not compared. Other checks still run;
+  a missing invoice on such a line is reported but not valued.
+- Conversion rows that conflict for the same SKU and unit are ambiguous: all of them are rejected as
+  validation issues, so that unit is treated as unconvertible. Exact repeats keep the first row.
+- Evidence on converted lines shows the original figures, e.g. `240 EA x 2.10 converted to CASE (1 CASE = 24 EA)`.
+
 ## Tests
 
 ```bash
@@ -97,8 +121,8 @@ then prints the evaluation report to the run summary (see [`.github/workflows/ci
 ## Evaluation
 
 OpsResolve is measured against a labelled synthetic dataset in [`data/evaluation/`](data/evaluation/):
-32 scenarios (34 PO lines, 39 invoice lines, 34 receipt lines) and a hand-computed answer key of
-33 expected exceptions covering every exception type.
+35 scenarios (37 PO lines, 42 invoice lines, 37 receipt lines, 3 per-SKU unit conversions) and a
+hand-computed answer key of 35 expected exceptions covering every exception type.
 
 ```bash
 python -m opsresolve.evaluation                              # print the report
@@ -111,14 +135,15 @@ is a *known limitation*). `expected_exceptions.csv` is the answer key: exception
 amount impact and (where the rules define one) quantity difference, with the arithmetic in `rationale`.
 Every PO number belongs to exactly one scenario. Scenarios cover exact matches, partial deliveries and
 split billing, price, quantity, supplier and currency mismatches, missing PO / receipt / invoice,
-duplicate invoices, and lines with several simultaneous discrepancies. All parties are fictional
+duplicate invoices, units of measure, and lines with several simultaneous discrepancies. All parties are fictional
 (`Synthetic Supplier E01` ... `E11`).
 
 **Ground truth.** The answer key records what a careful reviewer should conclude about each scenario,
-not what the engine currently outputs. Three scenarios are deliberately marked `known_limitation`
-because the documented rules are expected to get them wrong: a duplicate re-sent outside the 30-day
-window (S26), a legitimate second invoice whose goods receipt is not yet posted (S27), and a
-unit-of-measure difference that the engine does not convert (S32).
+not what the engine currently outputs. Scenarios are marked `known_limitation` when the documented rules
+are expected to get them wrong; two remain: a duplicate re-sent outside the 30-day window (S26) and a
+legitimate second invoice whose goods receipt is not yet posted (S27). S32 (boxes of 12 invoiced in
+units) was a known limitation until unit-of-measure support was added; its expected outcome (no
+exceptions) never changed, only its documents gained explicit units and a conversion row.
 
 **Definitions.**
 
@@ -138,10 +163,12 @@ unit-of-measure difference that the engine does not convert (S32).
 
 | TP | FP | FN | Precision | Recall | F1 | Exact amounts | Scenarios fully correct |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 32 | 3 | 1 | 0.914 | 0.970 | 0.941 | 32 / 32 | 29 / 32 |
+| 34 | 1 | 1 | 0.971 | 0.971 | 0.971 | 34 / 34 | 33 / 35 |
 
-All misses are the three known-limitation scenarios: one missed duplicate (S26) and three false positives
-(a duplicate in S27, and a quantity plus a price mismatch in S32). `tests/test_evaluation.py` pins these
+All misses are the two known-limitation scenarios: one missed duplicate (S26) and one false duplicate
+(S27). Before unit-of-measure support, the same 35-scenario dataset scored TP 33, FP 8, FN 2
+(F1 0.868), and the original 32-scenario dataset scored TP 32, FP 3, FN 1 (F1 0.941).
+`tests/test_evaluation.py` pins these
 numbers, so any change in detection behaviour fails CI until the change and the documented results are
 reviewed together.
 
@@ -164,7 +191,7 @@ CLAUDE.md         persistent project instructions for contributors and AI assist
 ## Roadmap (not yet built)
 
 - Larger and more varied evaluation datasets, and evaluation on anonymised real exports
-- Units of measure, FX conversion, tax/freight lines, credit notes, returns and PO amendments
+- FX conversion, tax/freight lines, credit notes, returns and PO amendments; supplier-specific pack sizes
 - Adapters for real ERP exports
 - Persistent exception tracking (status, owner, resolution)
 - Optional LLM layer for *narrative only* (e.g. drafting supplier queries from computed evidence) —

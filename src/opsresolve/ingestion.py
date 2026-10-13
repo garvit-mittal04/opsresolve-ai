@@ -16,11 +16,12 @@ from typing import Generic, TypeVar
 import pandas as pd
 from pydantic import BaseModel, ValidationError
 
-from opsresolve.models import GoodsReceiptLine, InvoiceLine, PurchaseOrderLine, ValidationIssue
+from opsresolve.models import GoodsReceiptLine, InvoiceLine, PurchaseOrderLine, UomConversion, ValidationIssue
 
 PURCHASE_ORDERS = "purchase_orders"
 INVOICES = "invoices"
 GOODS_RECEIVED = "goods_received"
+UOM_CONVERSIONS = "uom_conversions"
 
 REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     PURCHASE_ORDERS: (
@@ -34,6 +35,7 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     GOODS_RECEIVED: (
         "grn_number", "received_date", "supplier_id", "po_number", "sku", "quantity_received",
     ),
+    UOM_CONVERSIONS: ("sku", "uom", "base_uom", "units_per_uom"),
 }
 
 RecordT = TypeVar("RecordT", bound=BaseModel)
@@ -61,10 +63,15 @@ class Dataset:
     purchase_orders: LoadResult[PurchaseOrderLine]
     invoices: LoadResult[InvoiceLine]
     goods_received: LoadResult[GoodsReceiptLine]
+    # None when no conversion file was supplied (the default, pre-UoM behaviour).
+    uom_conversions: LoadResult[UomConversion] | None = None
 
     @property
     def issues(self) -> list[ValidationIssue]:
-        return self.purchase_orders.issues + self.invoices.issues + self.goods_received.issues
+        issues = self.purchase_orders.issues + self.invoices.issues + self.goods_received.issues
+        if self.uom_conversions is not None:
+            issues += self.uom_conversions.issues
+        return issues
 
 
 def _read_raw(path: Path, file_label: str, result: LoadResult) -> pd.DataFrame | None:
@@ -195,9 +202,51 @@ def load_goods_received(path: str | Path) -> LoadResult[GoodsReceiptLine]:
     return result
 
 
-def load_dataset(po_path: str | Path, invoice_path: str | Path, grn_path: str | Path) -> Dataset:
+def load_uom_conversions(path: str | Path) -> LoadResult[UomConversion]:
+    """Load per-SKU unit conversions.
+
+    Ambiguity is never resolved by picking a row: if a (sku, uom) pair is defined
+    more than once with a different base unit or factor, every row for that pair
+    is rejected, so the unit is treated as unconvertible. Exact repeats are
+    rejected as duplicates with the first row kept.
+    """
+    result: LoadResult[UomConversion] = LoadResult(UOM_CONVERSIONS)
+    frame = _read_raw(Path(path), UOM_CONVERSIONS, result)
+    if frame is None:
+        return result
+
+    by_pair: dict[tuple[str, str], list[tuple[UomConversion, dict[str, str]]]] = {}
+    for record, raw in _validate_rows(frame, UomConversion, result):
+        if record.uom == record.base_uom and record.units_per_uom != 1:
+            _reject(result, record, raw, "units_per_uom",
+                    f"{record.uom} is its own base unit, so units_per_uom must be 1")
+            continue
+        by_pair.setdefault((record.sku, record.uom), []).append((record, raw))
+
+    for (sku, uom), rows in by_pair.items():
+        first = rows[0][0]
+        if any((r.base_uom, r.units_per_uom) != (first.base_uom, first.units_per_uom) for r, _ in rows):
+            for record, raw in rows:
+                _reject(result, record, raw, "units_per_uom",
+                        f"Conflicting conversions for SKU {sku} unit {uom}; conversion is ambiguous")
+            continue
+        for record, raw in rows[1:]:
+            _reject(result, record, raw, "uom",
+                    f"Duplicate conversion for SKU {sku} unit {uom} (first seen on line {first.source_row})")
+        result.records.append(first)
+    result.records.sort(key=lambda r: r.source_row)
+    return result
+
+
+def load_dataset(
+    po_path: str | Path,
+    invoice_path: str | Path,
+    grn_path: str | Path,
+    uom_conversions_path: str | Path | None = None,
+) -> Dataset:
     return Dataset(
         purchase_orders=load_purchase_orders(po_path),
         invoices=load_invoices(invoice_path),
         goods_received=load_goods_received(grn_path),
+        uom_conversions=None if uom_conversions_path is None else load_uom_conversions(uom_conversions_path),
     )

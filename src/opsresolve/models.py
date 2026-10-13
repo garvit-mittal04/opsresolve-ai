@@ -20,10 +20,22 @@ def round_money(value: Decimal) -> Decimal:
     return value.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
 
 
+def _normalize_uom(value: str) -> str:
+    value = value.upper()
+    if not (1 <= len(value) <= 10 and value.isascii() and value.isalnum()):
+        raise ValueError("must be a unit-of-measure code of 1-10 letters or digits (e.g. EA, BOX, KG)")
+    return value
+
+
 class _Record(BaseModel):
     model_config = ConfigDict(frozen=True, str_strip_whitespace=True, extra="ignore")
 
     source_row: int = Field(description="Line number in the source CSV file (the header is line 1).")
+
+    @field_validator("unit_of_measure", check_fields=False)
+    @classmethod
+    def _uom_code(cls, value: str | None) -> str | None:
+        return None if value is None else _normalize_uom(value)
 
     @field_validator("currency", check_fields=False)
     @classmethod
@@ -45,6 +57,8 @@ class PurchaseOrderLine(_Record):
     unit_price: Decimal = Field(ge=0)
     currency: str
     order_date: date
+    # Optional. None means "not stated"; see opsresolve.uom for how stated units are compared.
+    unit_of_measure: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -60,6 +74,9 @@ class InvoiceLine(_Record):
     quantity_invoiced: Decimal = Field(gt=0)
     unit_price: Decimal = Field(ge=0)
     currency: str
+    unit_of_measure: str | None = None
+    # Set only on a line converted into its PO's unit: describes the original figures.
+    converted_from: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -77,10 +94,29 @@ class GoodsReceiptLine(_Record):
     po_number: str = Field(min_length=1)
     sku: str = Field(min_length=1)
     quantity_received: Decimal = Field(ge=0)
+    unit_of_measure: str | None = None
+    converted_from: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.po_number, self.sku)
+
+
+class UomConversion(_Record):
+    """One unit of ``uom`` of ``sku`` equals ``units_per_uom`` of ``base_uom``.
+
+    Conversions are per SKU: a BOX of one item says nothing about a BOX of another.
+    """
+
+    sku: str = Field(min_length=1)
+    uom: str
+    base_uom: str
+    units_per_uom: Decimal = Field(gt=0)
+
+    @field_validator("uom", "base_uom")
+    @classmethod
+    def _codes(cls, value: str) -> str:
+        return _normalize_uom(value)
 
 
 class Severity(str, Enum):
@@ -98,6 +134,7 @@ class ExceptionType(str, Enum):
     MISSING_GOODS_RECEIPT = "MISSING_GOODS_RECEIPT"
     MISSING_INVOICE = "MISSING_INVOICE"
     POSSIBLE_DUPLICATE_INVOICE = "POSSIBLE_DUPLICATE_INVOICE"
+    UNIT_OF_MEASURE_MISMATCH = "UNIT_OF_MEASURE_MISMATCH"
 
 
 class Evidence(BaseModel):

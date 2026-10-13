@@ -25,11 +25,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--purchase-orders", type=Path, help="Override path to the purchase orders CSV.")
     parser.add_argument("--invoices", type=Path, help="Override path to the invoices CSV.")
     parser.add_argument("--goods-received", type=Path, help="Override path to the goods received CSV.")
+    parser.add_argument("--uom-conversions", type=Path,
+                        help="Per-SKU unit-of-measure conversions CSV. Optional: defaults to "
+                             "uom_conversions.csv in --data-dir when that file exists.")
     parser.add_argument("--output-dir", type=Path, default=Path("reports"),
                         help="Where to write the report files (default: reports).")
     parser.add_argument("--fail-on-exceptions", action="store_true",
                         help="Exit with status 1 if any exception or validation issue is found.")
     return parser
+
+
+def _optional(path: Path) -> Path | None:
+    return path if path.exists() else None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         args.invoices or args.data_dir / "invoices.csv",
         args.goods_received or args.data_dir / "goods_received.csv",
         config,
+        uom_conversions_path=args.uom_conversions or _optional(args.data_dir / "uom_conversions.csv"),
     )
     print(render_console(result))
     paths = write_reports(result, args.output_dir)
