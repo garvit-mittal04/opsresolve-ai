@@ -60,6 +60,8 @@ python -m opsresolve         # run on data/sample, write reports/ (git-ignored)
 - Change sample data → update `data/sample/README.md` and `tests/test_end_to_end.py`.
   Expected values in tests are derived by hand from the scenario, never pasted from output.
 - Output ordering and exception IDs must stay deterministic (same input → same report).
+- CI (`.github/workflows/ci.yml`) runs `pytest` on Python 3.10 and 3.14 for pushes and PRs to `main`;
+  keep it green, and keep its permissions read-only and its actions pinned to commit SHAs.
 - Run `pytest` and make it pass before declaring work complete. Do not report tests as passing
   unless they were actually run.
 - Keep dependencies minimal (pandas, pydantic; pytest for dev).
