@@ -1,5 +1,7 @@
 # OpsResolve AI
 
+[![CI](https://github.com/garvit-mittal04/opsresolve-ai/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/garvit-mittal04/opsresolve-ai/actions/workflows/ci.yml)
+
 AI-powered operations exception investigator for manufacturing and distribution businesses.
 OpsResolve finds discrepancies between **purchase orders**, **supplier invoices** and
 **goods-received records**, quantifies them, shows the evidence and recommends a corrective action.
@@ -88,6 +90,9 @@ currency is a 3-letter ISO code.
 ```bash
 pytest
 ```
+
+GitHub Actions runs the same suite on every push and pull request to `main`, on Python 3.10 and 3.14
+(see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ## Project layout
 
