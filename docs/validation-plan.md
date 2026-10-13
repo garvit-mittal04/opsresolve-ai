@@ -2,7 +2,7 @@
 
 How we establish that OpsResolve is correct, and what has **not** yet been validated.
 
-## 1. What "correct" means for milestone 1
+## 1. What "correct" means
 
 - Every invalid input row is reported with file, line and field, and excluded from matching.
 - Every seeded discrepancy in the sample data is detected with the right type, quantity and amount.

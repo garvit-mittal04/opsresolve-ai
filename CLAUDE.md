@@ -9,7 +9,9 @@ businesses: discrepancies between purchase orders (PO), supplier invoices and go
 notes (GRN). It finds the discrepancy, quantifies it, lists the evidence and recommends a
 corrective action.
 
-Current state: **milestone 1** — a deterministic Python core (no LLM). See `docs/architecture.md`.
+Current state: **Milestone 6 merged** — a deterministic Python engine (no LLM) with unit-of-measure
+normalisation and evidence-based duplicate detection, a labelled synthetic evaluation set, a CLI and
+a local Streamlit web app. See `docs/architecture.md`.
 
 ## Non-negotiable rules
 
@@ -37,7 +39,7 @@ src/opsresolve/
   matching.py    Group invoices/receipts under PO lines by (po_number, sku)   (pure)
   uom.py         Convert documents to the PO line's unit via per-SKU table    (pure)
   detection.py   Exception rules, amounts, severity, recommended actions     (pure)
-  pipeline.py    Orchestration: ingestion -> matching -> detection
+  pipeline.py    Orchestration: ingestion -> matching -> uom -> detection
   reporting.py   Markdown / CSV / console rendering                         (no rules)
   webapp.py      Helpers for app.py: temp-file runs, summaries, safe downloads (no rules, no Streamlit)
   evaluation.py  Scores the pipeline against data/evaluation's answer key    (P/R/F1)
@@ -45,7 +47,7 @@ src/opsresolve/
 app.py           Streamlit local web app (layout only; run: streamlit run app.py)
 data/sample/     Synthetic CSVs + README describing every seeded scenario
 data/evaluation/ Labelled evaluation dataset (scenarios.csv, expected_exceptions.csv)
-tests/           Pytest suite (unit + end-to-end on sample data)
+tests/           Pytest suite (unit, end-to-end, evaluation, web-app helpers, Streamlit AppTest UI)
 docs/            architecture.md, validation-plan.md
 ```
 
@@ -53,9 +55,10 @@ docs/            architecture.md, validation-plan.md
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,app]"  # "app" adds Streamlit; without it the UI tests are skipped
 pytest                       # run all tests
 python -m opsresolve         # run on data/sample, write reports/ (git-ignored)
+python -m streamlit run app.py   # local web app on http://localhost:8501
 ```
 
 ## Working conventions

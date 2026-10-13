@@ -12,14 +12,20 @@ OpsResolve finds discrepancies between **purchase orders**, **supplier invoices*
 
 ## What it does
 
-1. Loads `purchase_orders.csv`, `invoices.csv` and `goods_received.csv`.
-2. Validates every row (required fields, numbers, ISO dates, currency codes, key uniqueness) and
-   reports problems by file, line and field. Invalid rows are excluded, never guessed at.
+1. Loads `purchase_orders.csv`, `invoices.csv` and `goods_received.csv`, plus an optional per-SKU
+   `uom_conversions.csv`.
+2. Validates every row (required fields, numbers, ISO dates, currency codes, unit codes, key uniqueness)
+   and reports problems by file, line and field. Invalid rows are excluded, never guessed at.
 3. Matches invoices and receipts to PO lines by `(po_number, sku)`.
-4. Detects: quantity mismatches (billed vs received, over-receipt), price mismatches, currency and
-   supplier mismatches, missing PO / goods receipt / invoice, and possible duplicate invoices.
-5. Calculates quantity differences and amount impact exactly.
-6. Writes a readable Markdown report plus CSV exports, ordered by severity.
+4. Normalises units of measure: where documents state units, quantities and prices are converted to the
+   PO line's unit using only the per-SKU conversions supplied, and only when the result is exact
+   (see [Units of measure](#units-of-measure-optional)).
+5. Detects: quantity mismatches (billed vs received, over-receipt), price mismatches, currency,
+   supplier and unit-of-measure mismatches, missing PO / goods receipt / invoice, and possible
+   duplicate invoices (judged against the PO's ordered and received quantities).
+6. Calculates quantity differences and amount impact exactly.
+7. Writes a readable Markdown report plus CSV exports, ordered by severity, from the CLI or from the
+   [local web app](#local-web-app), which also lets you filter and inspect findings in a browser.
 
 See [`docs/architecture.md`](docs/architecture.md) for the rule table and
 [`docs/validation-plan.md`](docs/validation-plan.md) for how correctness is tested.
@@ -33,8 +39,11 @@ git clone https://github.com/garvit-mittal04/opsresolve-ai.git
 cd opsresolve-ai
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+pip install -e ".[dev,app]"        # engine + tests + web app (Streamlit)
 ```
+
+The `app` extra adds Streamlit for the web app and its UI tests. `pip install -e ".[dev]"` installs only the
+engine, CLI and test tools; with it, `pytest` skips the Streamlit UI tests (reported as skipped in its summary).
 
 ## Run
 
@@ -74,10 +83,12 @@ cd opsresolve-ai
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[app]"            # adds Streamlit; use ".[dev,app]" to also run the tests
-streamlit run app.py
+streamlit run app.py               # or: python -m streamlit run app.py
 ```
 
-Run the last command from the repository folder so Streamlit picks up `.streamlit/config.toml`.
+Streamlit reads `.streamlit/config.toml` from next to `app.py` (checked with Streamlit 1.50 and 1.65), so its
+localhost-only and no-telemetry settings apply wherever you launch from; command-line flags or `STREAMLIT_*`
+environment variables that you set yourself still override them.
 It opens `http://localhost:8501` in your browser; stop it with `Ctrl+C` in the terminal.
 
 ### Performing a reconciliation
@@ -122,7 +133,11 @@ remove them or close the tab. Uploads are limited to 20 MB and `.csv` files.
   has not been validated on real supplier data**, and its findings need human review.
 - Single user, local only: no login, sharing, saved runs or status tracking of exceptions.
 - Files must use the column names above; there is no column mapping for ERP exports.
-- Tested with Streamlit 1.50 and 1.65 on Linux (Python 3.10 and 3.14); please confirm on your Mac.
+- Verified versions (on Linux): the full test suite passes with Streamlit 1.65 on Python 3.10 and 3.14.
+  With Streamlit 1.50, the declared minimum, the app was only smoke-tested in a browser (upload, run,
+  CSV download) on Python 3.13; 17 UI tests fail there because Streamlit 1.50's test tool (`AppTest`) has a
+  smaller API (no file-upload or download-button support, and dropdowns can only be set by value), while
+  the other 201 tests pass. CI runs on Linux only.
 
 ## Configuration
 
@@ -136,7 +151,7 @@ set -a; source .env; set +a
 python -m opsresolve
 ```
 
-No API keys or secrets are needed for milestone 1. Never commit `.env`.
+No API keys or secrets are needed. Never commit `.env`.
 
 ## Input format
 
@@ -179,6 +194,7 @@ Rules (see `src/opsresolve/uom.py`):
 pytest
 ```
 
+Install with `.[dev,app]` (see [Setup](#setup)) so the Streamlit UI tests run instead of being skipped.
 GitHub Actions runs the same suite on every push and pull request to `main`, on Python 3.10 and 3.14,
 then prints the evaluation report to the run summary (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 

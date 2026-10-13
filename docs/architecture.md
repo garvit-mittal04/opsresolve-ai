@@ -1,17 +1,20 @@
 # OpsResolve AI — Architecture
 
-## Goals of milestone 1
+## Scope (as of Milestone 6)
 
-A working, deterministic three-way-match exception investigator:
+A deterministic three-way-match exception investigator:
 
-1. Load purchase order, invoice and goods-received CSV files.
+1. Load purchase order, invoice and goods-received CSV files, plus optional per-SKU unit conversions.
 2. Validate input; report missing/invalid fields with file, line and field.
 3. Match records with deterministic business rules.
-4. Detect quantity mismatches, price mismatches, missing records and possible duplicate invoices.
-5. Calculate discrepancies exactly.
-6. Produce a readable exception report (Markdown + CSV + console summary).
+4. Normalise units of measure where documents state them (exact, per-SKU conversions only).
+5. Detect quantity, price, currency, supplier and unit-of-measure mismatches, missing records and
+   possible duplicate invoices.
+6. Calculate discrepancies exactly.
+7. Produce a readable exception report (Markdown + CSV + console summary) from the CLI or the local
+   Streamlit web app, and score the engine against a labelled synthetic dataset (`evaluation.py`).
 
-No LLM is used anywhere in milestone 1.
+No LLM is used anywhere.
 
 ## Data flow
 
@@ -19,7 +22,12 @@ No LLM is used anywhere in milestone 1.
  CSV files ──► ingestion.py ──► validated records ──► matching.py ──► MatchResult
                (Pandas reads                         (group by          │
                 raw strings;                          po_number+sku)    ▼
-                Pydantic validates)                               detection.py
+                Pydantic validates)                                  uom.py
+                     │                                (convert to the PO line's unit with
+                     │                                 per-SKU conversions; unresolved lines)
+                     │                                                  │
+                     │                                                  ▼
+                     │                                            detection.py
                      │                                            (rules, amounts,
                      └──► ValidationIssues + rejected keys ──────► severity, actions)
                                                                         │
@@ -28,10 +36,13 @@ No LLM is used anywhere in milestone 1.
                                               (Markdown, CSV, console)
 ```
 
+`cli.py`, `evaluation.py` and the web app (`webapp.py` / `app.py`) all call `pipeline.investigate_files`.
+
 | Layer | Responsibility | Must not |
 |---|---|---|
 | `ingestion` | Read CSV as strings, normalise headers, validate each row via Pydantic, enforce key uniqueness | apply business rules |
 | `matching` | Attach invoice and receipt lines to the PO line they reference | judge whether anything is wrong |
+| `uom` | Convert invoice and receipt lines to the PO line's unit using the per-SKU conversion table; mark lines that cannot be converted exactly | guess pack sizes or round |
 | `detection` | Apply rules, compute differences and amounts, assign severity, write evidence and actions | read files or format reports |
 | `reporting` | Render results | compute business values |
 | `pipeline` / `cli` | Wire layers together, load config | contain rules |
