@@ -91,6 +91,8 @@ class Dataset:
     goods_received: LoadResult[GoodsReceiptLine]
     # None when no conversion file was supplied (the default, pre-UoM behaviour).
     uom_conversions: LoadResult[UomConversion] | None = None
+    # The import profile every file was read with; None means the built-in format (no profile).
+    profile: ImportProfile | None = None
 
     @property
     def issues(self) -> list[ValidationIssue]:
@@ -428,4 +430,5 @@ def load_dataset(
         goods_received=load_goods_received(grn_path, fmt(GOODS_RECEIVED)),
         uom_conversions=None if uom_conversions_path is None
         else load_uom_conversions(uom_conversions_path, fmt(UOM_CONVERSIONS)),
+        profile=profile,
     )

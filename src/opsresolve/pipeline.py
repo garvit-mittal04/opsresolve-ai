@@ -24,6 +24,11 @@ class InvestigationResult:
     generated_at: datetime
     units: UnitNormalization | None = None
 
+    @property
+    def profile(self) -> ImportProfile | None:
+        """The import profile the input files were read with (None: built-in format)."""
+        return self.dataset.profile
+
 
 def investigate(dataset: Dataset, config: MatchConfig | None = None) -> InvestigationResult:
     config = config or MatchConfig()

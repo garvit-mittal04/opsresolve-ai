@@ -166,11 +166,16 @@ def load_profile(path: str | Path) -> ImportProfile:
     path = Path(path)
     try:
         size = path.stat().st_size
+        if size > MAX_PROFILE_BYTES:
+            raise ProfileError([f"profile file: is {size} bytes; the limit is {MAX_PROFILE_BYTES}"])
+        with path.open("rb") as handle:
+            # Read one byte past the limit at most: a device or pipe can report size 0 yet never end.
+            data = handle.read(MAX_PROFILE_BYTES + 1)
     except OSError as exc:
         raise ProfileError([f"profile file: cannot be read ({exc.strerror or exc})"]) from None
-    if size > MAX_PROFILE_BYTES:
-        raise ProfileError([f"profile file: is {size} bytes; the limit is {MAX_PROFILE_BYTES}"])
-    return parse_profile(path.read_bytes())
+    if len(data) > MAX_PROFILE_BYTES:
+        raise ProfileError([f"profile file: is longer than the limit of {MAX_PROFILE_BYTES} bytes"])
+    return parse_profile(data)
 
 
 def parse_profile(data: bytes) -> ImportProfile:

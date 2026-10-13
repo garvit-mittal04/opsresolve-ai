@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from opsresolve.config import MatchConfig
 from opsresolve.pipeline import investigate_files
+from opsresolve.profiles import ProfileError, load_profile
 from opsresolve.reporting import render_console, write_reports
 
 DEFAULT_DATA_DIR = Path("data/sample")
@@ -28,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--uom-conversions", type=Path,
                         help="Per-SKU unit-of-measure conversions CSV. Optional: defaults to "
                              "uom_conversions.csv in --data-dir when that file exists.")
+    parser.add_argument("--profile", type=Path,
+                        help="Import profile (JSON) declaring the CSV format of every input file, including "
+                             "uom_conversions.csv. Without it, the built-in format is used.")
     parser.add_argument("--output-dir", type=Path, default=Path("reports"),
                         help="Where to write the report files (default: reports).")
     parser.add_argument("--fail-on-exceptions", action="store_true",
@@ -46,6 +50,13 @@ def main(argv: list[str] | None = None) -> int:
     except ValidationError as exc:
         print(f"Invalid OPSRESOLVE_* configuration:\n{exc}", file=sys.stderr)
         return 2
+    profile = None
+    if args.profile is not None:
+        try:
+            profile = load_profile(args.profile)
+        except ProfileError as exc:
+            print(f"{args.profile}: {exc}", file=sys.stderr)
+            return 2
 
     result = investigate_files(
         args.purchase_orders or args.data_dir / "purchase_orders.csv",
@@ -53,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         args.goods_received or args.data_dir / "goods_received.csv",
         config,
         uom_conversions_path=args.uom_conversions or _optional(args.data_dir / "uom_conversions.csv"),
+        profile=profile,
     )
     print(render_console(result))
     paths = write_reports(result, args.output_dir)
