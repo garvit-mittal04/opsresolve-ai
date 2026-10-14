@@ -1109,6 +1109,7 @@ def test_explanation_module_needs_no_new_dependency_or_network():
 
 
 def test_no_existing_module_uses_the_explanation_module():
+    # The optional AI provider (ai.py, Stage B) is its only user; the engine, CLI, reports and app never use it.
     users = [path.name for path in [*(REPO / "src" / "opsresolve").glob("*.py"), REPO / "app.py"]
              if path.name != "explanation.py" and "opsresolve.explanation" in imported_modules(path)]
-    assert users == []
+    assert users == ["ai.py"]
