@@ -1,0 +1,34 @@
+{
+  "profile_version": 1,
+  "name": "Reformatted sample, German ERP layout (test fixture)",
+  "defaults": {
+    "delimiter": ";",
+    "encoding": "cp1252",
+    "date_format": "DD.MM.YYYY",
+    "decimal_separator": ",",
+    "thousands_separator": "."
+  },
+  "files": {
+    "purchase_orders": {
+      "columns": {
+        "po_number": "Bestellnummer", "line_number": "Position", "supplier_id": "Lieferantennummer",
+        "supplier_name": "Lieferantenname", "sku": "Artikelnummer", "description": "Bezeichnung",
+        "quantity_ordered": "Bestellmenge", "unit_price": "Stückpreis", "currency": "Währung",
+        "order_date": "Bestelldatum"
+      }
+    },
+    "invoices": {
+      "columns": {
+        "invoice_number": "Rechnungsnummer", "invoice_date": "Rechnungsdatum", "supplier_id": "Lieferantennummer",
+        "po_number": "Bestellnummer", "sku": "Artikelnummer", "quantity_invoiced": "Berechnete Menge",
+        "unit_price": "Stückpreis", "currency": "Währung"
+      }
+    },
+    "goods_received": {
+      "columns": {
+        "grn_number": "Wareneingangsnummer", "received_date": "Eingangsdatum", "supplier_id": "Lieferantennummer",
+        "po_number": "Bestellnummer", "sku": "Artikelnummer", "quantity_received": "Gelieferte Menge (Stück)"
+      }
+    }
+  }
+}

@@ -643,3 +643,97 @@ def test_the_forbidding_patches_are_wired_to_the_names_actually_called(monkeypat
     assert calls == ["opsresolve.ingestion._read_with_format", "opsresolve.cli.load_profile",
                      "opsresolve.webapp.check_profile"]
     assert not (tmp_path / "exception_report.md").exists()
+
+
+# ---- reformatted data/sample (milestone 7, acceptance gap G3: criterion 2) ---------------------------
+# tests/fixtures/profiles/sample_de is data/sample rewritten as a German ERP export (see its README).
+# Read with its profile it must give the same records, exceptions and validation outcomes as the original.
+# Deliberate differences, because only the source format differs: LoadResult.file_format and the
+# dataset's profile (None for the original), and the messages listed in test_sample_de_validation_outcomes.
+
+import re  # noqa: E402
+
+SAMPLE_DE = FIXTURES / "sample_de"
+SAMPLE_DE_PROFILE = FIXTURES / "sample_de_profile.json"
+SAMPLE_ROWS = {"purchase_orders": 19, "invoices": 22, "goods_received": 21}
+
+
+def sample_pair():
+    original = investigate_files(*[SAMPLE_DIR / f"{n}.csv" for n in FILES])
+    reformatted = investigate_files(*[SAMPLE_DE / f"{n}.csv" for n in FILES], profile=load_profile(SAMPLE_DE_PROFILE))
+    return original, reformatted
+
+
+@pytest.mark.parametrize("label", FILES)
+def test_sample_de_fixture_is_written_in_the_declared_format(label):
+    data = (SAMPLE_DE / f"{label}.csv").read_bytes()
+    with pytest.raises(UnicodeDecodeError):
+        data.decode("utf-8")  # cp1252, not UTF-8: the headers contain single-byte umlauts
+    lines = data.decode("cp1252").split("\n")
+    assert lines[-1] == "" and "\r" not in data.decode("cp1252")
+    header, rows = lines[0].split(";"), [line.split(";") for line in lines[1:-1]]
+    assert any(ch in lines[0] for ch in "äü") and "," not in lines[0]
+    assert len(rows) == SAMPLE_ROWS[label] and all(len(row) == len(header) for row in rows)
+    text = "\n".join(lines[1:])
+    assert re.search(r";[0-9]{2}\.[0-9]{2}\.2026(;|\n)", text)  # DD.MM.YYYY
+    assert ";5.000" in text  # thousands dot
+    assert not re.search(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", text)  # no ISO dates left
+    if label != "goods_received":
+        assert re.search(r";[0-9]+,[0-9]{2};", text)  # decimal comma
+
+
+def test_sample_de_fixture_does_not_load_without_its_profile():
+    dataset = load_dataset(*[SAMPLE_DE / f"{n}.csv" for n in FILES])
+    assert [len(getattr(dataset, n).records) for n in FILES] == [0, 0, 0]
+
+
+def test_sample_de_records_are_identical_to_the_original():
+    original, reformatted = sample_pair()
+    for label in FILES:
+        before, after = getattr(original.dataset, label), getattr(reformatted.dataset, label)
+        assert len(before.records) > 0
+        # Every field of every accepted record, including source_row (the CSV line number).
+        assert after.records == before.records
+        assert (after.rows_read, after.rows_rejected, after.rejected_keys) == (
+            before.rows_read, before.rows_rejected, before.rejected_keys)
+        assert after.file_label == before.file_label == label
+        assert before.file_format is None and after.file_format.delimiter == ";"  # deliberate difference
+    assert original.dataset.uom_conversions is reformatted.dataset.uom_conversions is None
+    assert original.profile is None
+    assert reformatted.profile.name == "Reformatted sample, German ERP layout (test fixture)"
+
+
+def test_sample_de_exceptions_are_identical_to_the_original():
+    original, reformatted = sample_pair()
+    assert len(original.exceptions) == 18  # the seeded sample scenarios (data/sample/README.md)
+    # IDs, types, severities, exact amounts, quantities, notes and evidence (source, reference, line).
+    assert [e.model_dump() for e in reformatted.exceptions] == [e.model_dump() for e in original.exceptions]
+    assert reformatted.match == original.match
+
+
+def test_sample_de_validation_outcomes_match_the_original():
+    original, reformatted = sample_pair()
+    before, after = original.dataset.issues, reformatted.dataset.issues
+    # The same rejected rows, at the same file, line and field, in the same order.
+    assert [(i.file, i.row, i.field) for i in after] == [(i.file, i.row, i.field) for i in before] == [
+        ("purchase_orders", 16, "unit_price"), ("invoices", 15, "quantity_invoiced"),
+        ("goods_received", 18, "received_date")]
+    # Messages and values must be identical except for these two, written out in full:
+    different = {
+        # The raw value differs (the malformed date rewritten in the declared format): allowed by criterion 2.
+        ("goods_received", 18, "received_date"):
+            ("09.13.2026", "'09.13.2026' is not a valid calendar date (format DD.MM.YYYY); row rejected"),
+        # The raw value is the same, but design rule 10 rejects letters in a number field with a message naming
+        # the declared format. Allowed by criterion 2 as amended: messages must match except where the raw value
+        # differs or where the declared-format rules (design rules 10-11) require a format-specific message.
+        ("invoices", 15, "quantity_invoiced"):
+            ("twelve", "'twelve' is not a number in the declared format (decimal separator ',', "
+                       "thousands separator '.'); row rejected"),
+    }
+    for old, new in zip(before, after):
+        key = (old.file, old.row, old.field)
+        if key in different:
+            assert (new.value, new.message) == different[key]
+        else:
+            assert (new.value, new.message) == (old.value, old.message)
+    assert before[1].value == after[1].value == "twelve"
