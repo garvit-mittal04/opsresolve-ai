@@ -1,5 +1,11 @@
 """Report rendering. Formats results only; performs no business calculations
-beyond counting and grouping already-computed exceptions."""
+beyond counting and grouping already-computed exceptions.
+
+The default report files (``write_reports``) are written as before. The opt-in
+``investigations.csv`` (``write_investigations_csv``) renders investigation checks
+that the caller computed; every cell of that file is neutralised against
+spreadsheet formulas (``neutralize_cell``), unlike the default CSV files.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,7 @@ import re
 from collections import Counter, defaultdict
 from decimal import Decimal
 from pathlib import Path
+from typing import Mapping
 
 import pandas as pd
 
@@ -201,3 +208,69 @@ def write_reports(result: InvestigationResult, output_dir: str | Path) -> dict[s
     exceptions_frame(result).to_csv(paths["exceptions_csv"], index=False)
     validation_frame(result).to_csv(paths["validation_csv"], index=False)
     return paths
+
+
+# --------------------------------------------------------------------------- #
+# Investigation checks: opt-in investigations.csv (Stage D3)
+# --------------------------------------------------------------------------- #
+
+INVESTIGATIONS_CSV = "investigations.csv"
+INVESTIGATION_COLUMNS = [
+    "exception_id", "exception_type", "po_number", "sku", "check_id", "check", "candidate_explanation", "status",
+    "status_label", "observations", "needed_to_decide", "how_to_confirm", "records"]
+NO_CHECKS_LABEL = "No investigation checks apply to this type of finding."
+NOT_RUN_LABEL = "The checks for this finding could not be run — nothing concluded."
+
+# The same rule as the web app's CSV downloads (``webapp.neutralize_cell``); a test keeps the two identical.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_PLAIN_NUMBER = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)")
+
+
+def neutralize_cell(value):
+    """Text starting with a spreadsheet formula trigger gets a leading apostrophe, so it is shown as text; plain
+    numbers (e.g. -50.00) and non-text values are returned unchanged."""
+    if not isinstance(value, str) or not value.startswith(_FORMULA_PREFIXES):
+        return value
+    if _PLAIN_NUMBER.fullmatch(value):
+        return value
+    return "'" + value
+
+
+def investigations_frame(result: InvestigationResult, investigations: Mapping[str, object]) -> pd.DataFrame:
+    """One row per check of every exception (in exception and check order), or one row for an exception with no
+    checks. ``investigations`` is ``investigation.investigate_all(result)``; it is rendered, never re-evaluated.
+    A failed check shows its status and fixed label only, never details of the failure."""
+    rows = []
+    for exc in result.exceptions:
+        found = investigations[exc.exception_id]
+        base = {"exception_id": exc.exception_id, "exception_type": exc.exception_type.value,
+                "po_number": exc.po_number or "", "sku": exc.sku or ""}
+        empty = dict.fromkeys(INVESTIGATION_COLUMNS[4:], "")
+        if any(failure.stage == "subject" for failure in found.failures):
+            rows.append({**base, **empty, "status": "failed", "status_label": NOT_RUN_LABEL})
+            continue
+        if not found.checks:
+            rows.append({**base, **empty, "status_label": NO_CHECKS_LABEL})
+            continue
+        records = {r.ref: f"{r.ref}={r.source}:{r.source_row}:{r.reference}" for r in found.related}
+        for check in found.checks:
+            row = {**base, **empty, "check_id": check.id, "check": check.code, "candidate_explanation":
+                   check.statement, "status": check.status.value, "status_label": check.status_label}
+            if check.status.value != "failed":
+                cited = dict.fromkeys(ref for o in check.observations for ref in o.refs)
+                row.update(
+                    observations=" | ".join(f"{o.text} [{', '.join(o.refs)}]" for o in check.observations),
+                    needed_to_decide=" | ".join(check.missing), how_to_confirm=check.how_to_confirm,
+                    records=" | ".join(records[ref] for ref in cited))
+            rows.append(row)
+    return pd.DataFrame(rows, columns=INVESTIGATION_COLUMNS)
+
+
+def write_investigations_csv(result: InvestigationResult, investigations: Mapping[str, object],
+                             output_dir: str | Path) -> Path:
+    """Write ``investigations.csv`` with every cell neutralised against spreadsheet formulas."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / INVESTIGATIONS_CSV
+    investigations_frame(result, investigations).map(neutralize_cell).to_csv(path, index=False)
+    return path

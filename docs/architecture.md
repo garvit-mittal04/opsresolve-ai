@@ -16,7 +16,9 @@ A deterministic three-way-match exception investigator:
    Streamlit web app, and score the engine against a labelled synthetic dataset (`evaluation.py`).
 
 No LLM is used in matching, detection, calculations, reports, the CLI or the web app. Milestone 8 adds an
-optional, separate layer that asks a model to explain one exception (see AI explanations below).
+optional, separate layer that asks a model to explain one exception (see AI explanations below), and a
+deterministic investigation layer that checks candidate explanations against the loaded records (Stage D, see
+Investigation checks below); neither changes an exception.
 
 ## Data flow
 
@@ -245,6 +247,8 @@ browser ──► app.py (layout, widgets) ──► webapp.py (plain Python) �
 - An optional import-profile upload (upload mode only) is validated in memory; an invalid profile shows
   its problems in a table and disables Run. Results read with a profile show its name and short hash.
 - Text from uploaded files is shown in tables or Markdown-escaped, never rendered as Markdown/HTML.
+- Each finding's detail panel shows its investigation checks (Stage D2): `webapp.cached_investigations` computes
+  them for every finding once per run and keeps them with the stored run (see Investigation checks below).
 - `.streamlit/config.toml` binds the server to `localhost`, disables usage statistics and limits uploads.
 
 ## Configuration
@@ -260,6 +264,10 @@ its API key is only `ANTHROPIC_API_KEY`, which the configuration never holds.
 With an import profile, the console summary and the Markdown report also name the profile and its hash.
 `--fail-on-exceptions` makes the CLI exit 1 when anything is found (for scheduled/CI use).
 An invalid import profile makes the CLI exit 2 without writing reports.
+`--with-investigations` (off by default) also writes `reports/investigations.csv` (Stage D3, see Investigation
+checks below); without it the CLI's output is unchanged. If the checks cannot be prepared, the CLI prints a fixed
+message, writes the other reports as usual, removes an earlier `investigations.csv` file (a symlink: only the
+link; a directory of that name is left alone) and exits 3.
 
 ## AI explanations (Milestone 8, Stages A–C)
 
@@ -322,3 +330,87 @@ InvestigationResult ──► explanation.build_evidence_pack ──► ai.pseud
 - Tests (`tests/test_explanation.py`, `tests/test_ai.py`) are offline: fakes and a mocked HTTP transport.
   The tests against the real SDK need the `ai` extra, which CI installs; CI sets
   `OPSRESOLVE_REQUIRE_AI_SDK_TESTS=1` so they fail instead of skipping if it cannot be imported.
+
+## Investigation checks (Milestone 8, Stage D)
+
+`investigation.py` is a separate, pure layer on top of the engine's results: it reads an `InvestigationResult`
+and returns new frozen objects. For some exception types it lists candidate explanations from a fixed, reviewed
+catalogue and checks each one deterministically against the loaded records, with exact `Decimal` comparisons.
+It never changes an exception, amount, severity, ID, classification or recommended action, never states that a
+cause is confirmed, and uses no AI, network, files or logging (CLAUDE.md rule 2 and its approved exception).
+
+```
+InvestigationResult ──► investigation._Index (built once per run: lines by supplier and SKU, unmatched
+      (unchanged)            documents, conversion rows, unresolved units)
+                                   │
+                                   ▼  per exception: _subject (which line or document) → APPLICABLE checks
+                     Investigation(exception_id, related R1…, checks H1…, missing, failures)
+                                   │
+              ┌────────────────────┴─────────────────────┐
+              ▼                                          ▼
+  webapp.cached_investigations (D2)          cli --with-investigations (D3)
+  detail panel: tables and st.text           reporting.write_investigations_csv
+                                             (every cell neutralised)
+```
+
+**Statuses.** `consistent` ("Consistent with the data — not confirmed"), `contradicted` ("Contradicted by the
+data": comparable, complete records exist and none fits) and `not_checkable` ("Can't be checked": records
+missing, possibly rejected, in other or unstated units, or not conclusive; `missing` says what would decide it)
+are the evidence statuses. When several records fit, the check is consistent, cites every candidate and adds
+"The match is not unique: N candidates fit." `failed` ("Check failed — nothing concluded") is an operational
+state, not evidence: the check raised an error. It is contained per check (an error while preparing one
+exception's subject, per exception) and recorded in `Investigation.failures` as the stage and error class name
+only. The web app shows the check identifier and the fixed label (for example "H2: Check failed — nothing
+concluded"); `investigations.csv` gives the check identifier, check code, fixed candidate explanation, status
+`failed` and the fixed label, with the observation, evidence and next-step cells empty. Neither shows the error
+message, exception type or traceback (the class name stays in `Investigation.failures`, for tests). `strict=True` re-raises instead; the tests use it so
+unexpected failures are never hidden. An error while indexing the run always propagates: the web app shows a
+fixed message and the CLI exits 3, and the findings, metrics and default reports are unaffected.
+
+**Catalogue (v1).**
+
+| Check | Applies to | Consistent | Contradicted | Can't be checked |
+|---|---|---|---|---|
+| `receipt_not_posted` | over-billed quantity mismatch; missing goods receipt | invoiced ≤ ordered | never | invoiced > ordered (an unposted delivery above the order cannot be ruled out); rejected rows of the line; unresolved units |
+| `unit_mix_up` | quantity mismatches (billed, over-receipt); price mismatch | totals or prices differ exactly by a per-SKU factor ≠ 1, or converting exactly one document makes the totals equal | one document per side and no factor relates them | no conversion file or row for the SKU; for quantity mismatches, rejected invoice or receipt rows that may belong to the line (checked before any factor is tried: the totals may be incomplete); rejected conversion rows, only when no loaded factor fits (a factor may be missing); several documents and no fit; unresolved units |
+| `mistyped_po_number` | missing purchase order (unmatched invoice or receipt) | a PO line of the same supplier and SKU whose number is equal ignoring case, separators and leading zeros of digit groups, or one substituted character or two swapped adjacent characters away (same length) | such PO lines exist, none is close | none for the supplier and SKU; rejected PO rows that may hide one |
+| `document_under_other_po` | missing goods receipt; missing invoice; over-receipt | another receipt (invoice) of the same supplier and SKU has exactly the invoiced (received) quantity, or another PO line has exactly the excess open | comparable documents or lines exist, none fits | none comparable; rejected rows; candidates only in another or unstated unit; unresolved units |
+| `price_from_other_order` | price mismatch | another PO line of the same supplier, SKU, currency and unit has exactly the invoice's unit price | comparable lines exist, none has that price | none comparable; rejected PO rows; candidates only in another or unstated unit |
+
+**Matching rules.** Same supplier and SKU; exact quantities and prices; quantities and prices of different PO
+lines (and unmatched documents) compared only in the same unit of measure, or with no unit stated on either;
+documents on a matched line are in that line's unit after the engine's conversion. A check that relies on a PO
+line's totals is not concluded when a rejected row could belong to that line (a rejected row of that PO and
+SKU, a rejected row whose PO number or SKU could not be read, or a file-level problem).
+
+**Evidence references.** Checks are numbered H1, H2, … in catalogue order; cited records R1, R2, … in order of
+first citation, each with its file, CSV line (header is line 1) and document number. Every observation lists
+the references it relies on; every statement, observation and next step is fixed text with values filled in
+from the cited records.
+
+**Web app (D2).** `webapp.py` is the only application module of the web app that imports
+`opsresolve.investigation`. `cached_investigations` stores the results with the stored run and recomputes them
+when the fingerprint or the result object changes. Check text and document numbers are shown only in table
+cells and `st.text`, with carriage returns and invisible format characters replaced; headings and messages are
+fixed text.
+
+**CLI (D3).** `--with-investigations` computes the checks once and `reporting.write_investigations_csv`
+writes `investigations.csv`: one row per check (or one row for an exception without checks; one `failed` row
+with a fixed label for an exception whose checks could not be run). `reporting` only renders the objects it is
+given and does not import the investigation layer. Every cell goes through `reporting.neutralize_cell`, the same
+rule as the web app's downloads (a test keeps the two identical); this is an intentional difference from
+`exceptions.csv` and `validation_issues.csv`, which are written exactly as before.
+
+**Boundaries.** Only `webapp.py` and `cli.py` import `opsresolve.investigation`; the engine, reports,
+evaluation, AI layer and `app.py` do not (tested). The AI explanations do not receive investigation results.
+
+**Tests.** `tests/test_investigation.py` (rules, the hand-written fixture in `tests/fixtures/investigations/`,
+invariants on the fixture, sample and evaluation data, purity and boundaries), `tests/test_webapp.py` and
+`tests/test_app_ui.py` (display, failures, hostile text, caching), `tests/test_investigations_csv.py` (the CLI
+output, formula neutralisation, failures, unchanged default outputs). The fixture is separate from the
+evaluation answer key, which the checks do not affect.
+
+**Limitations.** Records in another unit are excluded, never converted; a unit mix-up on some but not all of
+several documents is not checkable; the rejected-row rule is broad (an unreadable PO number or SKU affects the
+whole file's checks); other currencies are not compared; "consistent" cannot see documents missing from the
+export; the checks have been exercised on synthetic data only.
