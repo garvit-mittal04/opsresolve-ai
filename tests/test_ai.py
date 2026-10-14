@@ -11,6 +11,7 @@ import importlib
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +45,21 @@ REPO = Path(__file__).resolve().parents[1]
 SAMPLE = REPO / "data" / "sample"
 KEY = "sk-ant-test-key-never-sent-0123456789"
 NAMES = ("Northgate", "Bramwell", "Calder", "Delmore", "Fenwick")
+
+
+class NetworkBlocked(AssertionError):
+    pass
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """No test in this module may open a real connection (the real-SDK tests use a mocked transport)."""
+    def blocked(*args, **kwargs):
+        raise NetworkBlocked("a test tried to open a network connection")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked)
+    monkeypatch.setattr(socket, "create_connection", blocked)
 
 
 @pytest.fixture(scope="module")
@@ -909,7 +925,7 @@ def test_logs_hold_no_key_prompt_evidence_names_or_answer(supplier_case, caplog)
     explain_exception(result, exc, FakeProvider(json.dumps(bad)), config=AIConfig())  # rejected
     explain_exception(result, exc, FakeProvider(error=ExplanationError("timeout", "The request timed out.")),
                       config=AIConfig())  # error
-    explain_exception(result, exc, config=AIConfig(), environ={API_KEY_VARIABLE: KEY})  # not configured here
+    explain_exception(result, exc, config=AIConfig(), environ={})  # no key: not configured, with or without the SDK
     records = [r for r in caplog.records if r.name == "opsresolve.ai"]
     assert [r.getMessage().split("status=")[1].split()[0] for r in records] == [
         "accepted", "rejected", "error", "not_configured"]
@@ -918,6 +934,13 @@ def test_logs_hold_no_key_prompt_evidence_names_or_answer(supplier_case, caplog)
                  "Invoice RVX", "2,500", "billed", *NAMES]
     assert [item for item in forbidden if item in text] == []
     assert "unsupported_name@explanation" in text and exc.exception_id in text
+
+
+def test_no_test_in_this_module_can_reach_the_network():
+    with pytest.raises(NetworkBlocked):
+        socket.create_connection(("api.anthropic.com", 443))
+    with pytest.raises(NetworkBlocked):
+        socket.socket().connect(("192.0.2.1", 443))
 
 
 def test_explaining_does_not_change_the_investigation(supplier_case):
