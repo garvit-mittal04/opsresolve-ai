@@ -15,7 +15,8 @@ A deterministic three-way-match exception investigator:
 7. Produce a readable exception report (Markdown + CSV + console summary) from the CLI or the local
    Streamlit web app, and score the engine against a labelled synthetic dataset (`evaluation.py`).
 
-No LLM is used anywhere.
+No LLM is used in matching, detection, calculations, reports, the CLI or the web app. Milestone 8 adds an
+optional, separate layer that asks a model to explain one exception (see AI explanations below).
 
 ## Data flow
 
@@ -250,6 +251,8 @@ browser ──► app.py (layout, widgets) ──► webapp.py (plain Python) �
 
 `MatchConfig` (Pydantic, validated) reads `OPSRESOLVE_*` environment variables — see `.env.example`.
 Invalid configuration aborts the CLI with exit code 2 (checked before an import profile is loaded).
+`AIConfig` reads `OPSRESOLVE_AI_*` (model, effort, timeout, retries, output size) for the optional AI layer;
+its API key is only `ANTHROPIC_API_KEY`, which the configuration never holds.
 
 ## Outputs
 
@@ -258,8 +261,51 @@ With an import profile, the console summary and the Markdown report also name th
 `--fail-on-exceptions` makes the CLI exit 1 when anything is found (for scheduled/CI use).
 An invalid import profile makes the CLI exit 2 without writing reports.
 
-## Where an LLM may fit later (not built)
+## AI explanations (Milestone 8, Stages A–B)
 
-Only on top of the deterministic results: drafting supplier emails or narrative summaries from
-already-computed exceptions, or classifying free-text notes. An LLM must never compute, alter or
-round an amount, and any generated text must cite the deterministic evidence.
+Optional and on top of the deterministic results only. Nothing in the engine, CLI, reports or web app
+uses it yet; the web-app integration (preview and explicit send) is Stage C.
+
+```
+InvestigationResult ──► explanation.build_evidence_pack ──► ai.pseudonymise (supplier ids)
+      (unchanged)            (Stage A, deterministic)              │
+                                                                   ▼
+            ai.preview_request ◄── ai.build_request: system prompt + evidence JSON (no severity)
+                                                                   │  ai.AnthropicProvider
+                                                                   ▼  (only module importing anthropic)
+     ExplanationResult ◄── validate (real pack + local supplier names) ◄── restore ids ◄── validate (sent pack)
+```
+
+- `explanation.py` (Stage A, pure): the evidence pack (engine facts, direction, the cited source records,
+  counts, limitations, ambiguities, SHA-256), the answer contract `ExplanationOutput` (no amount fields;
+  causes are unverified hypotheses) and `validate_explanation`. Its docstring lists what the validator
+  checks and its known limitations; passing it means consistent with the evidence, not true.
+- `ai.py` (Stage B): `AIConfig`, `AnthropicProvider` (Messages API with a JSON-schema output format that
+  uses only the schema keywords the API supports, the key passed explicitly from `ANTHROPIC_API_KEY` and no
+  other credential source, the base URL pinned to `https://api.anthropic.com`, no refusal fallback),
+  `preview_request`, and `explain_exception`, which returns an `ExplanationResult` with status
+  `accepted`, `rejected`, `not_configured` or `error` and never raises for these. Only an answer that
+  passes validation twice (against the pseudonymised pack that was sent and, with real ids restored,
+  against the real pack) is accepted.
+- Errors map to codes: `not_configured` (no SDK, no key, invalid settings, a client that cannot be
+  created; nothing is sent), `privacy_guard` (a known supplier id or name is still in the request; nothing
+  is sent), `authentication` (401/403), `rate_limited` (429), `timeout`, `connection`, `provider_error`
+  (including unexpected exceptions, reported by type only), `refused` (refusal stop reason), `malformed`
+  (cut off, empty or not text). The SDK retries 408/409/429/5xx and connection errors
+  (`OPSRESOLVE_AI_MAX_RETRIES`); there is no custom retry loop.
+- Defaults: `claude-opus-5-5`, effort `medium`, `max_tokens` 16000 (thinking is always on for this model and
+  counts toward the cap; only generated tokens are billed), a 300-second timeout (a request near the cap can
+  take minutes; each retry can take as long again). All are `OPSRESOLVE_AI_*` settings.
+- Data sent: listed field by field in `ai.TRANSMITTED_FIELDS` and the `ai.py` docstring. Every supplier id of
+  the loaded files that occurs in the pack is pseudonymised: in `supplier_id` fields on an exact match, and in
+  engine text (`ai.FREE_TEXT_FIELDS`; digits-only ids only after "supplier", so numbers are never changed).
+  Other fields are never changed, even when a SKU, document number or currency equals a supplier id. Before
+  sending, the request is checked field by field with the same rules for known ids, and every value for
+  known supplier names as whole words (any case or spacing; `SKU` does not match `SKU-1`). Names and
+  descriptions are never in a pack; document numbers, SKUs, quantities, prices, amounts and dates are sent
+  and are not anonymous.
+- Logging (`opsresolve.ai`): exception id, short pack hash, model, status, error code, latency, request
+  id and problem codes only — never the key, prompt, evidence, supplier names or the answer.
+- Tests (`tests/test_explanation.py`, `tests/test_ai.py`) are offline: fakes and a mocked HTTP transport.
+  The tests against the real SDK need the `ai` extra, which CI installs; CI sets
+  `OPSRESOLVE_REQUIRE_AI_SDK_TESTS=1` so they fail instead of skipping if it cannot be imported.

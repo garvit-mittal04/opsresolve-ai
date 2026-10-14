@@ -7,8 +7,10 @@ OpsResolve finds discrepancies between **purchase orders**, **supplier invoices*
 **goods-received records**, quantifies them, shows the evidence and recommends a corrective action.
 
 > **Status: deterministic engine with a CLI and a local web app.** All matching and financial
-> calculations are rule-based Python using exact decimal arithmetic. No LLM is used. Sample data is
-> synthetic; the tool has not been validated on real customer or supplier data.
+> calculations are rule-based Python using exact decimal arithmetic; no LLM is used for them. An optional,
+> separately installed module can ask an AI model to explain one exception from its evidence (advisory
+> only, see [AI explanations](#ai-explanations-optional)); it is not yet used by the CLI or the web app.
+> Sample data is synthetic; the tool has not been validated on real customer or supplier data.
 
 ## What it does
 
@@ -45,6 +47,8 @@ pip install -e ".[dev,app]"        # engine + tests + web app (Streamlit)
 
 The `app` extra adds Streamlit for the web app and its UI tests. `pip install -e ".[dev]"` installs only the
 engine, CLI and test tools; with it, `pytest` skips the Streamlit UI tests (reported as skipped in its summary).
+The optional `ai` extra (`pip install -e ".[dev,app,ai]"`) adds the Anthropic SDK for
+[AI explanations](#ai-explanations-optional); without it, the tests against the real SDK are skipped.
 
 ## Run
 
@@ -165,7 +169,35 @@ set -a; source .env; set +a
 python -m opsresolve
 ```
 
-No API keys or secrets are needed. Never commit `.env`.
+No API keys or secrets are needed for reconciliation. Only the optional AI explanations need
+`ANTHROPIC_API_KEY` (see below). Never commit `.env`.
+
+## AI explanations (optional)
+
+`opsresolve.ai.explain_exception(result, exception)` asks an Anthropic model to explain one exception in
+plain language: what differs, which evidence shows it, unverified possible causes and how to check them,
+and what information is missing. It needs `pip install -e ".[ai]"` and `ANTHROPIC_API_KEY`; without
+either it returns `not_configured` and sends nothing. Model, effort, timeout, retries and output size come
+from `OPSRESOLVE_AI_*` variables (see [`.env.example`](.env.example)).
+
+- **Advisory only.** The model never calculates or changes an amount or an exception; every figure stays
+  the engine's. Each answer is checked by a deterministic validator (citations, identifiers, dates,
+  numbers, signs, direction, codes, supplier names, sufficiency) and is returned only if it passes;
+  otherwise the result is `rejected` with the problems found. Passing does not make it true: a person
+  must review every explanation.
+- **What is sent.** One exception's evidence: the engine's facts and text, and for each evidence row its
+  document number, PO line, SKU, quantities, prices, currency, dates, units and line amounts. Supplier
+  ids are replaced by pseudonyms and supplier names and item descriptions are never sent, but this is
+  still business data and is not anonymous. If any known supplier id or name is still in the request,
+  nothing is sent. `opsresolve.ai.preview_request(...)` shows the exact request body;
+  `TRANSMITTED_FIELDS` and the module docstring list every field. Requests go only to
+  `https://api.anthropic.com` (`ANTHROPIC_BASE_URL` is ignored).
+- **Failures** (missing configuration, authentication, rate limits, timeouts, network, refusals,
+  malformed answers, unexpected provider errors, the privacy check) are returned as results with a code;
+  logs hold no key, prompt, evidence, names or answers. Automated tests never call the API.
+
+Not yet built: using this from the web app (with a preview and an explicit send action) and keeping any
+history of explanations.
 
 ## Input format
 
@@ -443,7 +475,8 @@ covered by the unit tests), uses one currency for prices, and measures only the 
 
 ```
 src/opsresolve/   models, config, profiles (import profiles), ingestion, matching, uom, detection,
-                  pipeline, reporting, cli, evaluation, webapp (helpers for the web app)
+                  pipeline, reporting, cli, evaluation, webapp (helpers for the web app),
+                  explanation (evidence packs and answer validation), ai (optional AI provider)
 app.py            Streamlit web app (layout only; see "Local web app")
 .streamlit/       local-only Streamlit settings (localhost, no telemetry)
 data/sample/      synthetic CSVs + README listing every seeded scenario and expected result
@@ -459,5 +492,5 @@ CLAUDE.md         persistent project instructions for contributors and AI assist
 - FX conversion, tax/freight lines, credit notes, returns and PO amendments; supplier-specific pack sizes
 - Validation of import profiles on real ERP exports, and ready-made profiles for common systems
 - Persistent exception tracking (status, owner, resolution)
-- Optional LLM layer for *narrative only* (e.g. drafting supplier queries from computed evidence) —
-  never for calculations
+- AI explanations in the web app, with a preview of what is sent and an explicit send action; later,
+  reviewer notes, resolution status and history (AI stays narrative only, never calculations)

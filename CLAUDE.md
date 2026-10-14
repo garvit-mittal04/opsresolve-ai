@@ -9,9 +9,11 @@ businesses: discrepancies between purchase orders (PO), supplier invoices and go
 notes (GRN). It finds the discrepancy, quantifies it, lists the evidence and recommends a
 corrective action.
 
-Current state: **Milestone 7 (import profiles)** — a deterministic Python engine (no LLM) with unit-of-measure
-normalisation and evidence-based duplicate detection, a labelled synthetic evaluation set, a CLI and
-a local Streamlit web app, plus optional, explicitly selected import profiles for other CSV layouts.
+Current state: **Milestone 8 (AI explanations), Stages A–B** — a deterministic Python engine (no LLM in any
+calculation) with unit-of-measure normalisation and evidence-based duplicate detection, a labelled synthetic
+evaluation set, a CLI and a local Streamlit web app, optional, explicitly selected import profiles for other
+CSV layouts, and an optional AI layer that explains one exception from its evidence (not yet used by the CLI
+or web app; see `docs/architecture.md`, "AI explanations").
 See `docs/architecture.md`; Milestone 7's approved deviations and deferred follow-ups are listed in
 `docs/validation-plan.md` (section 5).
 
@@ -46,6 +48,8 @@ src/opsresolve/
   reporting.py   Markdown / CSV / console rendering                         (no rules)
   webapp.py      Helpers for app.py: temp-file runs, summaries, safe downloads (no rules, no Streamlit)
   evaluation.py  Scores the pipeline against data/evaluation's answer key    (P/R/F1)
+  explanation.py Evidence packs, the AI answer contract and its deterministic validator (pure; no LLM)
+  ai.py          Optional Anthropic provider: config, request, pseudonymisation, explain_exception
   cli.py         Command-line entry point
 app.py           Streamlit local web app (layout only; run: streamlit run app.py)
 data/sample/     Synthetic CSVs + README describing every seeded scenario
@@ -60,6 +64,7 @@ docs/            architecture.md, validation-plan.md; examples/import-profile-ex
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,app]"  # "app" adds Streamlit; without it the UI tests are skipped
+                             # add "ai" for the Anthropic SDK; without it the real-SDK tests are skipped
 pytest                       # run all tests
 python -m opsresolve         # run on data/sample, write reports/ (git-ignored)
 python -m streamlit run app.py   # local web app on http://localhost:8501
@@ -79,7 +84,8 @@ python -m streamlit run app.py   # local web app on http://localhost:8501
   keep it green, and keep its permissions read-only and its actions pinned to commit SHAs.
 - Run `pytest` and make it pass before declaring work complete. Do not report tests as passing
   unless they were actually run.
-- Keep dependencies minimal (pandas, pydantic; pytest for dev; Streamlit only in the optional `app` extra).
+- Keep dependencies minimal (pandas, pydantic; pytest for dev; Streamlit only in the optional `app` extra;
+  the Anthropic SDK only in the optional `ai` extra).
 - The web app must stay a thin layer: no business rules in `app.py` or `webapp.py`, uploaded text never
   rendered as raw Markdown/HTML, and the server bound to localhost with telemetry off.
 - Import profiles: never discover or guess a profile, delimiter, encoding or format; a profile is used only
@@ -92,3 +98,10 @@ python -m streamlit run app.py   # local web app on http://localhost:8501
   `docs/examples/import-profile-example.json` valid (tested in `tests/test_app_ui.py`, which needs the `app`
   extra; CI installs it). The evaluation command has no profile option. Use `--profile` in full on the command
   line (`--p` is ambiguous between `--profile` and `--purchase-orders`; `--pr` resolves to `--profile`).
+- AI explanations: only `ai.py` imports `anthropic` (lazily); the engine, CLI, reports and app must not import
+  `opsresolve.ai`. The model never calculates or changes an amount or exception; every answer passes
+  `explanation.validate_explanation` before it is returned, and possible causes are unverified hypotheses.
+  The key comes only from `ANTHROPIC_API_KEY`. Never log the key, prompts, evidence, supplier names or
+  answers. Keep `ai.TRANSMITTED_FIELDS` and the `ai.py` docstring in step with what is sent. Tests never call
+  the API (fakes or a mocked transport); CI sets `OPSRESOLVE_REQUIRE_AI_SDK_TESTS=1` so the real-SDK tests
+  fail rather than skip there.

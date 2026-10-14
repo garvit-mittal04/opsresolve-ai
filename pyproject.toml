@@ -17,6 +17,8 @@ dependencies = [
 dev = ["pytest>=8"]
 # Local web app (app.py). Optional so the engine and CLI keep their small footprint.
 app = ["streamlit>=1.50"]
+# Optional AI explanations (opsresolve.ai). Never needed for reconciliation, reports or the web app.
+ai = ["anthropic>=1.13,<2"]
 
 [project.scripts]
 opsresolve = "opsresolve.cli:main"
