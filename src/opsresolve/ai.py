@@ -40,7 +40,10 @@ identify a supplier. Send it only where your data policy allows it.
 
 Logging (logger ``opsresolve.ai``) records the exception id, a short pack hash, the model, the status,
 an error code, the latency, the provider's request id and validation problem codes. It never records
-the API key, the prompt, the evidence, supplier names or the model's answer.
+the API key, the prompt, the evidence, supplier names or the model's answer. The SDK and its HTTP libraries
+can log request bodies and headers at debug level (for example with ``ANTHROPIC_LOG=debug``); while this
+module creates a client or sends a request, their records below WARNING are dropped for that thread only
+(``_quiet_sdk_logs``). Logger levels are not changed, and other threads and callers log as configured.
 """
 
 from __future__ import annotations
@@ -51,7 +54,9 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Mapping, Protocol
 
@@ -452,6 +457,61 @@ class ExplanationProvider(Protocol):
         ...
 
 
+# Loggers of the SDK and the HTTP libraries under it. At debug level they can record request bodies (the
+# pseudonymised evidence and the prompt), response headers and request ids, and HTTP/2 header frames.
+_SDK_LOGGER_PREFIXES = ("anthropic", "httpx2", "httpcore2", "httpx", "httpcore", "h11", "h2", "hpack")
+
+
+class _ThreadQuietFilter(logging.Filter):
+    """Drops records below WARNING emitted by a thread that is inside ``_quiet_sdk_logs``; others pass."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._threads: dict[int, int] = {}  # thread id -> nesting depth
+        self._lock = threading.Lock()
+
+    def enter(self) -> None:
+        with self._lock:
+            ident = threading.get_ident()
+            self._threads[ident] = self._threads.get(ident, 0) + 1
+
+    def leave(self) -> None:
+        with self._lock:
+            ident = threading.get_ident()
+            depth = self._threads.get(ident, 0) - 1
+            if depth > 0:
+                self._threads[ident] = depth
+            else:
+                self._threads.pop(ident, None)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= logging.WARNING or threading.get_ident() not in self._threads
+
+
+_SDK_LOG_FILTER = _ThreadQuietFilter()
+
+
+def _sdk_loggers() -> list[logging.Logger]:
+    """The SDK and HTTP-library loggers that exist now (a logger's filter applies to records it emits itself)."""
+    names = set(_SDK_LOGGER_PREFIXES) | {name for name in logging.Logger.manager.loggerDict
+                                         if name.split(".")[0] in _SDK_LOGGER_PREFIXES}
+    return [logging.getLogger(name) for name in sorted(names)]
+
+
+@contextmanager
+def _quiet_sdk_logs():
+    """While inside, SDK and HTTP-library records below WARNING from this thread are dropped, whatever their
+    logger's level (``ANTHROPIC_LOG=debug`` included). Levels are not changed, and other threads are unaffected."""
+    for sdk_logger in _sdk_loggers():
+        if _SDK_LOG_FILTER not in sdk_logger.filters:
+            sdk_logger.addFilter(_SDK_LOG_FILTER)
+    _SDK_LOG_FILTER.enter()
+    try:
+        yield
+    finally:
+        _SDK_LOG_FILTER.leave()
+
+
 def _import_sdk():
     try:
         return importlib.import_module("anthropic")
@@ -491,8 +551,9 @@ class AnthropicProvider:
             if not key:
                 raise ExplanationError("not_configured", f"{API_KEY_VARIABLE} is not set.")
             try:
-                client = self._sdk.Anthropic(api_key=key, base_url=API_BASE_URL, timeout=config.timeout_seconds,
-                                             max_retries=config.max_retries)
+                with _quiet_sdk_logs():
+                    client = self._sdk.Anthropic(api_key=key, base_url=API_BASE_URL,
+                                                 timeout=config.timeout_seconds, max_retries=config.max_retries)
             except Exception as exc:  # its message could echo settings: report the type only
                 raise ExplanationError("not_configured",
                                        f"The API client could not be created ({type(exc).__name__}).") from None
@@ -503,7 +564,8 @@ class AnthropicProvider:
 
     def generate(self, request: ProviderRequest) -> ProviderResponse:
         try:
-            response = self._client.messages.create(**request.body())
+            with _quiet_sdk_logs():  # the SDK's debug log would hold the request body and response headers
+                response = self._client.messages.create(**request.body())
         except Exception as exc:  # every SDK or transport failure becomes a classified ExplanationError
             raise _map_error(exc, self._sdk) from None
         request_id = getattr(response, "_request_id", None)

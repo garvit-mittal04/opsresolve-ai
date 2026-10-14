@@ -9,11 +9,11 @@ businesses: discrepancies between purchase orders (PO), supplier invoices and go
 notes (GRN). It finds the discrepancy, quantifies it, lists the evidence and recommends a
 corrective action.
 
-Current state: **Milestone 8 (AI explanations), Stages A–B** — a deterministic Python engine (no LLM in any
+Current state: **Milestone 8 (AI explanations), Stages A–C** — a deterministic Python engine (no LLM in any
 calculation) with unit-of-measure normalisation and evidence-based duplicate detection, a labelled synthetic
 evaluation set, a CLI and a local Streamlit web app, optional, explicitly selected import profiles for other
-CSV layouts, and an optional AI layer that explains one exception from its evidence (not yet used by the CLI
-or web app; see `docs/architecture.md`, "AI explanations").
+CSV layouts, and an optional AI layer that explains one exception from its evidence (offered per finding in the
+web app, off by default; not used by the engine, CLI or reports; see `docs/architecture.md`, "AI explanations").
 See `docs/architecture.md`; Milestone 7's approved deviations and deferred follow-ups are listed in
 `docs/validation-plan.md` (section 5).
 

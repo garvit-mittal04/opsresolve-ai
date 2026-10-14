@@ -1038,3 +1038,162 @@ def test_an_unknown_code_from_a_custom_provider_is_unexpected(offline, supplier_
     error = ai.ExplanationError("<script>x</script>", f"secret {KEY}")
     view = webapp.request_ai_explanation(result, exc, ready_config(), provider=FakeProvider(error=error))
     assert (view.status, view.error_code, view.message) == ("error", "unexpected", webapp.AI_UNEXPECTED_MESSAGE)
+
+
+# ---- C2 phase 1: interactive timeout and retry defaults for the web page --------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+
+def test_interactive_defaults_apply_when_the_variables_are_unset():
+    config = webapp.interactive_ai_config({})
+    assert (config.timeout_seconds, config.max_retries) == (120.0, 0)
+    assert config.model_dump(exclude={"timeout_seconds", "max_retries"}) == ai.AIConfig().model_dump(
+        exclude={"timeout_seconds", "max_retries"})  # nothing else changes
+
+
+@pytest.mark.parametrize("environ, expected", [
+    ({"OPSRESOLVE_AI_TIMEOUT_SECONDS": "45"}, (45.0, 0)),
+    ({"OPSRESOLVE_AI_MAX_RETRIES": "3"}, (120.0, 3)),
+    ({"OPSRESOLVE_AI_TIMEOUT_SECONDS": "300", "OPSRESOLVE_AI_MAX_RETRIES": "2"}, (300.0, 2)),
+    ({"OPSRESOLVE_AI_TIMEOUT_SECONDS": " 600 ", "OPSRESOLVE_AI_MAX_RETRIES": "0"}, (600.0, 0)),
+    ({"OPSRESOLVE_AI_TIMEOUT_SECONDS": "   ", "OPSRESOLVE_AI_MAX_RETRIES": ""}, (120.0, 0)),  # blank is unset
+])
+def test_explicit_settings_always_win_over_interactive_defaults(environ, expected):
+    before = dict(environ)
+    config = webapp.interactive_ai_config(environ)
+    assert (config.timeout_seconds, config.max_retries) == expected
+    assert environ == before  # the caller's mapping is not changed
+
+
+@pytest.mark.parametrize("environ", [{"OPSRESOLVE_AI_TIMEOUT_SECONDS": "0"},
+                                     {"OPSRESOLVE_AI_TIMEOUT_SECONDS": "601"},
+                                     {"OPSRESOLVE_AI_MAX_RETRIES": "-1"}, {"OPSRESOLVE_AI_MAX_RETRIES": "9"},
+                                     {"OPSRESOLVE_AI_MAX_RETRIES": "many"}])
+def test_invalid_explicit_settings_are_rejected_not_replaced(offline, monkeypatch, environ):
+    with pytest.raises(webapp.ValidationError):
+        webapp.interactive_ai_config(environ)
+    monkeypatch.setattr(ai, "sdk_available", lambda: True)
+    status = webapp.ai_status({ai.API_KEY_VARIABLE: KEY, **environ})
+    assert (status.ready, status.code) == (False, "invalid_settings") and "1 problem(s)" in status.message
+
+
+def test_the_status_reports_the_interactive_settings(offline, monkeypatch):
+    monkeypatch.setattr(ai, "sdk_available", lambda: True)
+    status = webapp.ai_status({ai.API_KEY_VARIABLE: KEY})
+    assert (status.config.timeout_seconds, status.config.max_retries) == (120.0, 0)
+
+
+def test_non_ui_callers_keep_the_library_defaults(offline, monkeypatch):
+    """AIConfig.from_env, explain_exception and the CLI are not affected by the web page's defaults."""
+    assert (ai.AIConfig.from_env({}).timeout_seconds, ai.AIConfig.from_env({}).max_retries) == (300.0, 2)
+    assert (ai.AIConfig().timeout_seconds, ai.AIConfig().max_retries) == (300.0, 2)
+    seen = []
+
+    def recording_provider(config, environ=None):
+        seen.append(config)
+        raise ai.ExplanationError("not_configured", "stop before any request")
+
+    monkeypatch.setattr(ai, "AnthropicProvider", recording_provider)
+    result = investigate_files(SAMPLE_DIR / "purchase_orders.csv", SAMPLE_DIR / "invoices.csv",
+                               SAMPLE_DIR / "goods_received.csv")
+    ai.explain_exception(result, result.exceptions[0], environ={})
+    assert [(c.timeout_seconds, c.max_retries) for c in seen] == [(300.0, 2)]
+    cli = (REPO / "src" / "opsresolve" / "cli.py").read_text(encoding="utf-8")
+    assert "opsresolve.ai" not in cli and "interactive_ai_config" not in cli
+
+
+def fake_sdk_recording(created: list, text: str):
+    """A stand-in for the Anthropic SDK that records the client settings and returns one answer."""
+    class Error(Exception):
+        pass
+
+    def anthropic(**kwargs):
+        created.append(kwargs)
+        message = SimpleNamespace(content=[SimpleNamespace(type="text", text=text)], stop_reason="end_turn",
+                                  _request_id="req_fake")
+        return SimpleNamespace(messages=SimpleNamespace(create=lambda **body: message))
+
+    return SimpleNamespace(Anthropic=anthropic, APITimeoutError=type("T", (Error,), {}),
+                           APIConnectionError=Error, AuthenticationError=Error, PermissionDeniedError=Error,
+                           RateLimitError=Error, APIStatusError=Error)
+
+
+@pytest.mark.parametrize("environ, expected", [({}, (120.0, 0)),
+                                               ({"OPSRESOLVE_AI_TIMEOUT_SECONDS": "45",
+                                                 "OPSRESOLVE_AI_MAX_RETRIES": "1"}, (45.0, 1))])
+def test_the_provider_is_built_with_the_effective_settings(offline, supplier_case, monkeypatch, environ, expected):
+    result, exc = supplier_case
+    created = []
+    monkeypatch.setattr(ai, "sdk_available", lambda: True)
+    monkeypatch.setattr(ai, "_import_sdk", lambda: fake_sdk_recording(created, json.dumps(answer(exc.exception_id))))
+    environ = {ai.API_KEY_VARIABLE: KEY, **environ}
+    status = webapp.ai_status(environ)
+    view = webapp.request_ai_explanation(result, exc, status.config, environ=environ)
+    assert view.status == "accepted"
+    [settings] = created
+    assert (settings["timeout"], settings["max_retries"]) == expected
+    assert settings["base_url"] == ai.API_BASE_URL and settings["api_key"] == KEY  # the fake key, never shown
+
+
+# ---- C2 follow-up L1: at most one request per finding at a time -----------------------------------------------
+
+import threading  # noqa: E402
+
+
+def test_a_second_send_cannot_start_while_the_first_is_running():
+    guard = webapp.AIRequestGuard()
+    key = ("run", "EXC-0001")
+    started, release = threading.Event(), threading.Event()
+    calls, results = [], {}
+
+    def slow_request():
+        calls.append("first")
+        started.set()
+        assert release.wait(5)
+        return "first answer"
+
+    worker = threading.Thread(target=lambda: results.setdefault("first", guard.run(key, slow_request)))
+    worker.start()
+    assert started.wait(5)
+    assert guard.is_pending(key) and guard.is_running(key)
+    assert guard.mark_pending(key) is False  # the page cannot queue another send
+    assert guard.run(key, lambda: calls.append("second") or "second answer") is None  # nor start one
+    assert calls == ["first"]
+    release.set()
+    worker.join(5)
+    assert results["first"] == "first answer" and not guard.is_pending(key)
+    assert guard.run(key, lambda: "later answer") == "later answer"  # a later send works
+
+
+def test_the_pending_state_is_cleared_after_any_outcome():
+    guard = webapp.AIRequestGuard()
+    key = ("run", "EXC-0001")
+    for outcome in ("answer", None):
+        assert guard.mark_pending(key) and guard.is_pending(key)
+        assert guard.run(key, lambda: outcome) == outcome
+        assert not guard.is_pending(key) and not guard.is_running(key)
+    assert guard.mark_pending(key)
+
+    def failing():
+        raise RuntimeError("timeout or anything unexpected")
+
+    with pytest.raises(RuntimeError):
+        guard.run(key, failing)
+    assert not guard.is_pending(key) and guard.mark_pending(key)
+
+
+def test_findings_are_independent_and_waiting_sends_for_other_findings_are_dropped():
+    guard = webapp.AIRequestGuard()
+    first, second, third = ("run", "EXC-0001"), ("run", "EXC-0002"), ("run", "EXC-0003")
+    assert guard.mark_pending(first) and guard.mark_pending(second) and guard.mark_pending(third)
+    started, release = threading.Event(), threading.Event()
+    worker = threading.Thread(target=guard.run, args=(third, lambda: started.set() or release.wait(5)))
+    worker.start()
+    assert started.wait(5)
+    guard.cancel_waiting(keep=second)
+    assert not guard.is_pending(first)  # not started: dropped
+    assert guard.is_pending(second) and guard.is_running(third)  # the shown one and the running one stay
+    assert guard.run(second, lambda: "independent") == "independent"
+    release.set()
+    worker.join(5)

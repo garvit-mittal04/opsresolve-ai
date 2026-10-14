@@ -261,10 +261,18 @@ With an import profile, the console summary and the Markdown report also name th
 `--fail-on-exceptions` makes the CLI exit 1 when anything is found (for scheduled/CI use).
 An invalid import profile makes the CLI exit 2 without writing reports.
 
-## AI explanations (Milestone 8, Stages A–B)
+## AI explanations (Milestone 8, Stages A–C)
 
-Optional and on top of the deterministic results only. Nothing in the engine, CLI, reports or web app
-uses it yet; the web-app integration (preview and explicit send) is Stage C.
+Optional and on top of the deterministic results only. The engine, CLI and reports do not use it. The web
+app (Stage C) offers it per finding through `webapp.py`, the only application module that imports
+`opsresolve.ai`: off by default (sidebar toggle), readiness from `webapp.ai_status`, an optional preview of
+the exact request (`st.code`), and one request only when the user presses the send button. Model-written
+text is shown with `st.text` and in table cells, rejected answers as problem codes and allow-listed field
+locations, failures as fixed messages. Results live in session memory, keyed by the run, and are cleared
+when inputs or settings change; nothing is saved and the findings and downloads are unchanged.
+`webapp.AIRequestGuard` (one per session) allows one request per finding at a time: a click marks the
+finding pending and reruns the page so the button is drawn disabled, then the request runs and the mark is
+cleared however it ends; a send that has not started is dropped when another finding is shown.
 
 ```
 InvestigationResult ──► explanation.build_evidence_pack ──► ai.pseudonymise (supplier ids)
@@ -295,7 +303,9 @@ InvestigationResult ──► explanation.build_evidence_pack ──► ai.pseud
   (`OPSRESOLVE_AI_MAX_RETRIES`); there is no custom retry loop.
 - Defaults: `claude-opus-5-5`, effort `medium`, `max_tokens` 16000 (thinking is always on for this model and
   counts toward the cap; only generated tokens are billed), a 300-second timeout (a request near the cap can
-  take minutes; each retry can take as long again). All are `OPSRESOLVE_AI_*` settings.
+  take minutes; each retry can take as long again). All are `OPSRESOLVE_AI_*` settings. The web app uses
+  `webapp.interactive_ai_config`: 120 seconds and no retries where `OPSRESOLVE_AI_TIMEOUT_SECONDS` or
+  `OPSRESOLVE_AI_MAX_RETRIES` is unset or blank (explicit values win, and are validated as usual).
 - Data sent: listed field by field in `ai.TRANSMITTED_FIELDS` and the `ai.py` docstring. Every supplier id of
   the loaded files that occurs in the pack is pseudonymised: in `supplier_id` fields on an exact match, and in
   engine text (`ai.FREE_TEXT_FIELDS`; digits-only ids only after "supplier", so numbers are never changed).
@@ -305,7 +315,10 @@ InvestigationResult ──► explanation.build_evidence_pack ──► ai.pseud
   descriptions are never in a pack; document numbers, SKUs, quantities, prices, amounts and dates are sent
   and are not anonymous.
 - Logging (`opsresolve.ai`): exception id, short pack hash, model, status, error code, latency, request
-  id and problem codes only — never the key, prompt, evidence, supplier names or the answer.
+  id and problem codes only — never the key, prompt, evidence, supplier names or the answer. The SDK and its
+  HTTP libraries can log request bodies, headers and request ids at debug level (e.g. `ANTHROPIC_LOG=debug`);
+  `ai._quiet_sdk_logs` drops their records below WARNING while `AnthropicProvider` creates a client or sends a
+  request, for that thread only. Logger levels are not changed, and other threads and callers are unaffected.
 - Tests (`tests/test_explanation.py`, `tests/test_ai.py`) are offline: fakes and a mocked HTTP transport.
   The tests against the real SDK need the `ai` extra, which CI installs; CI sets
   `OPSRESOLVE_REQUIRE_AI_SDK_TESTS=1` so they fail instead of skipping if it cannot be imported.

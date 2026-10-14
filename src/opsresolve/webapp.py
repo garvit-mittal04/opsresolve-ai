@@ -30,15 +30,17 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import re
 import tempfile
+import threading
 import typing
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Hashable, Mapping, TypeVar
 
 import pandas as pd
 from pydantic import ValidationError
@@ -471,19 +473,38 @@ AI_ACCEPTED_LABEL = ("AI-generated explanation (advisory). It was checked agains
                      "does not make it true: review it against the source documents before acting. The figures and "
                      "decisions above are the engine's and are unchanged.")
 AI_REJECTED_MESSAGE = "The AI answer did not pass the checks against the evidence, so it is not shown."
+AI_REQUEST_IN_PROGRESS = "A request for this finding is already in progress; wait for it to finish."
 AI_SUFFICIENCY = {"sufficient": "The model judged the evidence sufficient.",
                   "partial": "The model judged the evidence partial.",
                   "insufficient": "The model judged the evidence insufficient."}
 
 
+# Interactive defaults for the web page: a person waits for the answer, so a request is given up after two
+# minutes and not retried (the user can ask again). They apply only where the variable is unset or blank, exactly
+# as AIConfig.from_env treats it; an explicit value always wins. Other callers keep AIConfig's own defaults.
+INTERACTIVE_AI_DEFAULTS = {"OPSRESOLVE_AI_TIMEOUT_SECONDS": "120", "OPSRESOLVE_AI_MAX_RETRIES": "0"}
+
+
+def interactive_ai_config(environ: Mapping[str, str] | None = None) -> ai.AIConfig:
+    """The settings for a request made from the web page: ``AIConfig.from_env`` with ``INTERACTIVE_AI_DEFAULTS``
+    filled in for unset variables. Validated like any other setting (raises ``ValidationError``)."""
+    environ = os.environ if environ is None else environ
+    merged = dict(environ)
+    for name, value in INTERACTIVE_AI_DEFAULTS.items():
+        if not merged.get(name, "").strip():
+            merged[name] = value
+    return ai.AIConfig.from_env(merged)
+
+
 def ai_status(environ: Mapping[str, str] | None = None) -> AIStatus:
-    """Readiness for AI explanations, without importing the SDK or sending anything. Never shows the key."""
+    """Readiness for AI explanations, without importing the SDK or sending anything. Never shows the key.
+    When ready, ``config`` holds the interactive settings (see ``interactive_ai_config``)."""
     if not ai.sdk_available():
         return AIStatus(False, "sdk_missing", AI_STATUS_MESSAGES["sdk_missing"])
     if not ai.api_key_configured(environ):
         return AIStatus(False, "key_missing", AI_STATUS_MESSAGES["key_missing"])
     try:
-        config = ai.AIConfig.from_env(environ)
+        config = interactive_ai_config(environ)
     except ValidationError as exc:  # the count only: a value could be sensitive
         return AIStatus(False, "invalid_settings",
                         f"The OPSRESOLVE_AI_* settings are invalid ({exc.error_count()} problem(s)); fix them and "
@@ -622,3 +643,56 @@ def request_ai_explanation(result: InvestigationResult, exception: OpsException,
     except Exception:  # never show an unexpected error's text
         return AIExplanationView("error", AI_UNEXPECTED_MESSAGE, error_code="unexpected")
     return explanation_view(outcome)
+
+
+_T = TypeVar("_T")
+
+
+class AIRequestGuard:
+    """At most one AI request per key (a run and a finding) at a time. Thread-safe; one per browser session.
+
+    A send is first marked *pending* (so the page can show the button disabled), then started with ``run``,
+    which refuses a key that is already running. Pending and running marks are cleared when the request
+    ends, however it ends (answer, rejection, timeout or exception).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending: set[Hashable] = set()
+        self._running: set[Hashable] = set()
+
+    def is_pending(self, key: Hashable) -> bool:
+        """Whether a request for ``key`` is waiting to start or running."""
+        with self._lock:
+            return key in self._pending or key in self._running
+
+    def is_running(self, key: Hashable) -> bool:
+        with self._lock:
+            return key in self._running
+
+    def mark_pending(self, key: Hashable) -> bool:
+        """Mark a send for ``key``; False (and nothing changes) if one is already pending or running."""
+        with self._lock:
+            if key in self._pending or key in self._running:
+                return False
+            self._pending.add(key)
+            return True
+
+    def cancel_waiting(self, keep: Hashable) -> None:
+        """Drop sends that have not started for any key but ``keep`` (the finding now shown), so a request
+        is never sent later for a finding the user has left. Running requests are not affected."""
+        with self._lock:
+            self._pending = {key for key in self._pending if key == keep or key in self._running}
+
+    def run(self, key: Hashable, request: Callable[[], _T]) -> _T | None:
+        """Run ``request`` for ``key`` unless one is already running (then None and nothing is sent)."""
+        with self._lock:
+            if key in self._running:
+                return None
+            self._running.add(key)
+        try:
+            return request()
+        finally:
+            with self._lock:
+                self._running.discard(key)
+                self._pending.discard(key)
