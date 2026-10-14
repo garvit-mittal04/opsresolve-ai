@@ -584,3 +584,457 @@ def test_markdown_download_names_the_profile_and_csv_columns_are_unchanged():
         assert build(with_profile).splitlines()[0] == build(without).splitlines()[0]
     # Same data in both formats: identical downloadable exception rows.
     assert exceptions_csv(with_profile) == exceptions_csv(without)
+
+
+# ---- optional AI explanations (helpers only; fakes, no network) ------------------------------------------------
+
+import json  # noqa: E402
+import re  # noqa: E402
+import socket  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+from opsresolve import ai  # noqa: E402
+
+KEY = "sk-ant-test-key-never-sent-0123456789"  # fake; never sent anywhere
+SAMPLE_DIR = REPO / "data" / "sample"
+
+
+class NetworkBlocked(AssertionError):
+    pass
+
+
+@pytest.fixture
+def offline(monkeypatch):
+    """No real connection and no real key: every AI test below uses this."""
+    def blocked(*args, **kwargs):
+        raise NetworkBlocked("a test tried to open a network connection")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked)
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.delenv(ai.API_KEY_VARIABLE, raising=False)
+
+
+@pytest.fixture(scope="module")
+def supplier_case():
+    """Sample PO 4500010015 raised with SUP-001; invoice RVX-00981 from SUP-009 (a supplier mismatch)."""
+    result = investigate_files(SAMPLE_DIR / "purchase_orders.csv", SAMPLE_DIR / "invoices.csv",
+                               SAMPLE_DIR / "goods_received.csv")
+    [exc] = [e for e in result.exceptions
+             if e.exception_type is ExceptionType.SUPPLIER_MISMATCH and e.po_number == "4500010015"]
+    return result, exc
+
+
+def answer(exception_id: str, explanation: str | None = None) -> dict:
+    """A correct answer for the supplier mismatch, written against the pseudonymised pack."""
+    return {
+        "exception_id": exception_id, "direction": "not_applicable",
+        "explanation": explanation or ("Invoice RVX-00981 is from supplier SUPPLIER-2, but PO 4500010015 was raised "
+                                       "with supplier SUPPLIER-1 (E1, E2)."),
+        "confirmed_facts": [{"statement": "PO 4500010015 was raised with supplier SUPPLIER-1.", "evidence_refs": ["E1"]}],
+        "possible_causes": [{"hypothesis": "The invoice may have been keyed against the wrong supplier.",
+                             "status": "unverified_hypothesis", "supporting_refs": ["E2"],
+                             "how_to_check": "Compare invoice RVX-00981 with the vendor master."}],
+        "investigation_steps": [{"step": "Check the remittance details on invoice RVX-00981.", "evidence_refs": ["E2"]}],
+        "evidence_refs_used": ["E1", "E2"], "sufficiency": "partial",
+        "missing_information": ["The vendor master record."],
+    }
+
+
+class FakeProvider:
+    def __init__(self, text=None, error=None):
+        self.text, self.error, self.requests = text, error, []
+
+    def generate(self, request):
+        self.requests.append(request)
+        if self.error is not None:
+            raise self.error
+        return ai.ProviderResponse(self.text, "req_fake")
+
+
+def view_strings(view) -> list[str]:
+    """Every string in a view, fixed messages included."""
+    found = []
+
+    def walk(value):
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, (tuple, list)):
+            for item in value:
+                walk(item)
+        elif hasattr(value, "__dataclass_fields__"):
+            for name in value.__dataclass_fields__:
+                walk(getattr(value, name))
+
+    walk(view)
+    return found
+
+
+def model_strings(view) -> list[str]:
+    """The strings of a view that can hold model-written or validator-generated text."""
+    items = [*view.confirmed_facts, *view.possible_causes, *view.investigation_steps]
+    return [view.explanation, *view.missing_information, *(i.text for i in items), *(i.check for i in items),
+            *(ref for i in items for ref in i.refs), *(part for problem in view.problems for part in problem)]
+
+
+def ready_config() -> ai.AIConfig:
+    return ai.AIConfig()
+
+
+def test_fixed_ai_messages_hold_no_markup():
+    fixed = [*webapp.AI_STATUS_MESSAGES.values(), *webapp.AI_ERROR_MESSAGES.values(), webapp.AI_UNEXPECTED_MESSAGE,
+             webapp.AI_ACCEPTED_LABEL, webapp.AI_REJECTED_MESSAGE, *webapp.AI_SUFFICIENCY.values()]
+    assert [text for text in fixed if re.search(r"[<>\[\]`]", text)] == []
+    assert set(webapp.AI_ERROR_MESSAGES) == set(ai.ErrorCode.__args__)  # a fixed message for every error code
+
+
+# ---- readiness ---------------------------------------------------------------------------------------------------
+
+def test_status_without_the_sdk(offline, monkeypatch):
+    monkeypatch.setattr(ai, "sdk_available", lambda: False)
+    status = webapp.ai_status({ai.API_KEY_VARIABLE: KEY})
+    assert (status.ready, status.code, status.config) == (False, "sdk_missing", None)
+    assert status.message == webapp.AI_STATUS_MESSAGES["sdk_missing"]
+
+
+@pytest.mark.parametrize("environ", [{}, {ai.API_KEY_VARIABLE: "   "}])
+def test_status_without_a_key(offline, monkeypatch, environ):
+    monkeypatch.setattr(ai, "sdk_available", lambda: True)
+    status = webapp.ai_status(environ)
+    assert (status.ready, status.code, status.config) == (False, "key_missing", None)
+
+
+def test_status_with_invalid_settings_reports_a_count_only(offline, monkeypatch):
+    monkeypatch.setattr(ai, "sdk_available", lambda: True)
+    status = webapp.ai_status({ai.API_KEY_VARIABLE: KEY, "OPSRESOLVE_AI_TIMEOUT_SECONDS": "secret-looking-value",
+                               "OPSRESOLVE_AI_EFFORT": "maximum"})
+    assert (status.ready, status.code, status.config) == (False, "invalid_settings", None)
+    assert "2 problem(s)" in status.message and "secret-looking-value" not in status.message
+
+
+def test_status_when_ready_carries_the_settings_but_never_the_key(offline, monkeypatch):
+    monkeypatch.setattr(ai, "sdk_available", lambda: True)
+    status = webapp.ai_status({ai.API_KEY_VARIABLE: KEY, "OPSRESOLVE_AI_TIMEOUT_SECONDS": "60"})
+    assert (status.ready, status.code) == (True, "ready") and status.config.timeout_seconds == 60
+    assert KEY not in repr(status) and KEY not in status.message
+
+
+def test_the_status_check_does_not_import_the_sdk():
+    code = "import sys, opsresolve.webapp as w; w.ai_status({}); print('anthropic' in sys.modules)"
+    output = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
+    assert output.strip() == "False"
+
+
+# ---- preview -----------------------------------------------------------------------------------------------------
+
+def test_preview_is_the_exact_request_body_and_sends_nothing(offline, supplier_case, monkeypatch):
+    result, exc = supplier_case
+    monkeypatch.setattr(ai, "explain_exception", lambda *a, **k: pytest.fail("a preview must not send"))
+    preview = webapp.preview_ai_request(result, exc, ready_config())
+    assert (preview.error_code, preview.message) == (None, None)
+    assert preview.body == ai.preview_request(result, exc, ready_config())
+    assert "SUP-001" not in preview.body and "SUP-009" not in preview.body and KEY not in preview.body
+
+
+def test_preview_blocked_by_the_privacy_guard_shows_a_fixed_message(offline, supplier_case, monkeypatch):
+    result, exc = supplier_case
+
+    def guarded(*args, **kwargs):
+        raise ai.ExplanationError("privacy_guard", "SUP-001 Northgate Fasteners Ltd remains")
+
+    monkeypatch.setattr(ai, "preview_request", guarded)
+    preview = webapp.preview_ai_request(result, exc, ready_config())
+    assert (preview.body, preview.error_code) == (None, "privacy_guard")
+    assert preview.message == webapp.AI_ERROR_MESSAGES["privacy_guard"]
+
+
+def test_an_unexpected_preview_failure_shows_no_error_text(offline, supplier_case, monkeypatch):
+    result, exc = supplier_case
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("secret internal detail SUP-001")
+
+    monkeypatch.setattr(ai, "preview_request", broken)
+    preview = webapp.preview_ai_request(result, exc, ready_config())
+    assert (preview.body, preview.error_code, preview.message) == (None, "unexpected", webapp.AI_UNEXPECTED_MESSAGE)
+
+
+# ---- explanations ------------------------------------------------------------------------------------------------
+
+def test_an_accepted_answer_is_literal_text_and_labelled(offline, supplier_case):
+    result, exc = supplier_case
+    provider = FakeProvider(json.dumps(answer(exc.exception_id)))
+    view = webapp.request_ai_explanation(result, exc, ready_config(), provider=provider)
+    assert len(provider.requests) == 1 and view.status == "accepted"
+    assert view.message == webapp.AI_ACCEPTED_LABEL and view.error_code is None and view.problems == ()
+    # Literal text, not Markdown: no escapes are added, and pseudonyms are restored to the local supplier ids.
+    assert view.explanation == ("Invoice RVX-00981 is from supplier SUP-009, but PO 4500010015 was raised with "
+                                "supplier SUP-001 (E1, E2).")
+    assert view.confirmed_facts == (webapp.AIItem("PO 4500010015 was raised with supplier SUP-001.", ("E1",)),)
+    assert view.possible_causes == (webapp.AIItem("The invoice may have been keyed against the wrong supplier.",
+                                                  ("E2",), "Compare invoice RVX-00981 with the vendor master."),)
+    assert view.investigation_steps == (webapp.AIItem("Check the remittance details on invoice RVX-00981.", ("E2",)),)
+    assert view.sufficiency == webapp.AI_SUFFICIENCY["partial"]
+    assert view.missing_information == ("The vendor master record.",)
+    assert "\\" not in " ".join(model_strings(view))
+
+
+def test_markup_written_by_the_model_stays_literal_text(offline, supplier_case):
+    """The view keeps markup exactly as written (it is data, shown literally by the page); it adds no escapes."""
+    result, exc = supplier_case
+    text = ("Invoice RVX-00981 is from supplier SUPPLIER-2 <script>alert(SUPPLIER-1)</script> <img src=E1 "
+            "onerror=steal> [click here](javascript:steal) ![pixel](E2) **bold** `code` (E1, E2).")
+    view = webapp.request_ai_explanation(result, exc, ready_config(),
+                                         provider=FakeProvider(json.dumps(answer(exc.exception_id, text))))
+    assert view.status == "accepted", view.problems
+    assert view.explanation == text.replace("SUPPLIER-2", "SUP-009").replace("SUPPLIER-1", "SUP-001")
+
+
+def test_a_rejected_answer_shows_problem_codes_and_locations_only(offline, supplier_case):
+    result, exc = supplier_case
+    bad = answer(exc.exception_id, "Northgate Fasteners Ltd billed 2,500 units of <b>SKU-X999</b> (E1, E2).")
+    bad["<img src=x onerror=steal>"] = "extra field"  # a field name chosen by the model becomes a location
+    view = webapp.request_ai_explanation(result, exc, ready_config(), provider=FakeProvider(json.dumps(bad)))
+    assert (view.status, view.message) == ("rejected", webapp.AI_REJECTED_MESSAGE)
+    assert view.problems and all(len(problem) == 2 for problem in view.problems)
+    assert view.explanation == "" and view.confirmed_facts == () and view.missing_information == ()
+    shown = " ".join(view_strings(view))
+    for secret in ("Northgate", "2,500", "SKU-X999", "img", "onerror", "<b>", "in this evidence", "names are not part"):
+        assert secret not in shown  # neither the answer, nor Problem.message, nor a field name the model invented
+    assert ("schema", webapp.UNEXPECTED_LOCATION) in view.problems
+
+
+def test_a_rejected_answer_after_restoring_ids_shows_no_supplier_id(offline, supplier_case):
+    """An invented identifier is quoted by Problem.message; the view keeps only its code and location."""
+    result, exc = supplier_case
+    bad = answer(exc.exception_id, "Invoice RVX-00981 is from supplier SUPPLIER-2 and also INV-77777 (E1, E2).")
+    view = webapp.request_ai_explanation(result, exc, ready_config(), provider=FakeProvider(json.dumps(bad)))
+    assert view.status == "rejected" and ("unsupported_identifier", "explanation") in view.problems
+    assert "INV-77777" not in " ".join(view_strings(view)) and "SUP-009" not in " ".join(view_strings(view))
+
+
+@pytest.mark.parametrize("text", ["not json", "{}", json.dumps({"exception_id": "EXC-0000"})])
+def test_malformed_answers_are_rejected_without_content(offline, supplier_case, text):
+    result, exc = supplier_case
+    view = webapp.request_ai_explanation(result, exc, ready_config(), provider=FakeProvider(text))
+    assert view.status == "rejected" and view.explanation == "" and view.problems
+    assert "not json" not in " ".join(view_strings(view))
+
+
+@pytest.mark.parametrize("code", sorted(ai.ErrorCode.__args__))
+def test_every_provider_error_shows_its_fixed_message(offline, supplier_case, code):
+    result, exc = supplier_case
+    error = ai.ExplanationError(code, f"secret raw detail {KEY} SUP-001", request_id="req_secret")
+    view = webapp.request_ai_explanation(result, exc, ready_config(), provider=FakeProvider(error=error))
+    assert (view.status, view.error_code, view.message) == ("error", code, webapp.AI_ERROR_MESSAGES[code])
+    shown = " ".join(view_strings(view))
+    assert "secret" not in shown and KEY not in shown and "req_secret" not in shown and view.explanation == ""
+
+
+def test_an_unclassified_provider_failure_shows_no_error_text(offline, supplier_case):
+    result, exc = supplier_case
+    view = webapp.request_ai_explanation(result, exc, ready_config(),
+                                         provider=FakeProvider(error=RuntimeError(f"secret {KEY}")))
+    assert (view.status, view.error_code, view.message) == ("error", "provider_error",
+                                                            webapp.AI_ERROR_MESSAGES["provider_error"])
+    assert "secret" not in " ".join(view_strings(view))
+
+
+def test_without_the_sdk_or_a_key_nothing_is_sent(offline, supplier_case, monkeypatch):
+    """The default provider: no key means not configured, whether or not the SDK is installed."""
+    result, exc = supplier_case
+    view = webapp.request_ai_explanation(result, exc, ready_config(), environ={})
+    assert (view.status, view.error_code) == ("unavailable", "not_configured")
+    assert view.message == webapp.AI_ERROR_MESSAGES["not_configured"]
+
+
+def test_the_privacy_guard_stops_a_request_before_the_provider(offline, supplier_case, monkeypatch):
+    result, exc = supplier_case
+    monkeypatch.setattr(ai, "pseudonymise", lambda pack, known: (pack, {}))  # a failed replacement
+    provider = FakeProvider(json.dumps(answer(exc.exception_id)))
+    view = webapp.request_ai_explanation(result, exc, ready_config(), provider=provider)
+    assert (view.status, view.error_code, provider.requests) == ("error", "privacy_guard", [])
+
+
+def test_an_unexpected_failure_shows_no_error_text(offline, supplier_case, monkeypatch):
+    result, exc = supplier_case
+
+    def broken(*args, **kwargs):
+        raise RuntimeError(f"secret {KEY}")
+
+    monkeypatch.setattr(ai, "explain_exception", broken)
+    view = webapp.request_ai_explanation(result, exc, ready_config(), provider=FakeProvider("{}"))
+    assert (view.status, view.error_code, view.message) == ("error", "unexpected", webapp.AI_UNEXPECTED_MESSAGE)
+
+
+def test_explaining_changes_no_result_record_or_download(offline, supplier_case):
+    result, exc = supplier_case
+    before = ([e.model_dump() for e in result.exceptions],
+              [[r.model_dump() for r in loaded.records] for loaded in
+               (result.dataset.purchase_orders, result.dataset.invoices, result.dataset.goods_received)],
+              exceptions_csv(result), validation_csv(result), summary_markdown(result))
+    webapp.preview_ai_request(result, exc, ready_config())
+    webapp.request_ai_explanation(result, exc, ready_config(),
+                                  provider=FakeProvider(json.dumps(answer(exc.exception_id))))
+    webapp.request_ai_explanation(result, exc, ready_config(), provider=FakeProvider("not json"))
+    after = ([e.model_dump() for e in result.exceptions],
+             [[r.model_dump() for r in loaded.records] for loaded in
+              (result.dataset.purchase_orders, result.dataset.invoices, result.dataset.goods_received)],
+             exceptions_csv(result), validation_csv(result), summary_markdown(result))
+    assert after == before
+
+
+def test_the_ai_tests_cannot_reach_the_network(offline):
+    with pytest.raises(NetworkBlocked):
+        socket.create_connection(("192.0.2.1", 443))
+
+
+# ---- audit fix M1: model-written text is literal, normalised text -----------------------------------------------
+
+def accepted_view(text: str, exception_id: str = "EXC-0001"):
+    """The view of an accepted answer whose free text is ``text`` (built directly: tests the display contract)."""
+    output = ai.ExplanationOutput.model_validate({
+        **answer(exception_id, text),
+        "confirmed_facts": [{"statement": text, "evidence_refs": ["E1"]}],
+        "possible_causes": [{"hypothesis": text, "status": "unverified_hypothesis", "supporting_refs": ["E2"],
+                             "how_to_check": text}],
+        "investigation_steps": [{"step": text, "evidence_refs": ["E2"]}],
+        "missing_information": [text]})
+    return webapp.explanation_view(ai.ExplanationResult("accepted", exception_id, "0" * 64, explanation=output))
+
+
+@pytest.mark.parametrize("written, shown", [
+    ("line one\rline two", "line one line two"),  # carriage return
+    ("Invoice ‮KCOLB‬ paid", "Invoice  KCOLB  paid"),  # bidi override and pop
+    ("A​B⁦C⁩D﻿E", "A B C D E"),  # zero-width space, isolates, byte-order mark
+    ("Kept\nas is", "Kept\nas is"),  # an ordinary newline is literal text, not Markdown
+])
+def test_carriage_returns_and_format_characters_become_spaces(written, shown):
+    assert webapp.literal_text(written) == shown
+    view = accepted_view(written)
+    items = [*view.confirmed_facts, *view.possible_causes, *view.investigation_steps]
+    for value in (view.explanation, *view.missing_information, *(i.text for i in items), view.possible_causes[0].check):
+        assert value == shown  # every model-written field is normalised the same way
+
+
+@pytest.mark.parametrize("written", [
+    "<script>alert(1)</script> <img src=x onerror=steal> <b>bold</b>",
+    "[click here](javascript:steal) ![pixel](https://evil.example/p.png)",
+    "# Heading **bold** `code` :red[alert] $x$",
+    "see https://evil.example/x?a=1 or www.evil.example",
+    "mail me@evil.example",
+])
+def test_markup_urls_and_emails_are_returned_literally_without_escapes(written):
+    """The contract is literal text for st.text or a table cell; a unit test cannot show how Streamlit renders it."""
+    view = accepted_view(written)
+    assert view.explanation == written and view.missing_information == (written,)
+    assert "\\" not in view.explanation  # no Markdown escapes are relied on
+
+
+def test_the_web_helpers_do_not_import_streamlit():
+    import ast
+    tree = ast.parse((REPO / "src" / "opsresolve" / "webapp.py").read_text(encoding="utf-8"))
+    imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+    imported |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    assert not any(name and name.split(".")[0] == "streamlit" for name in imported)
+
+
+# ---- audit fix L1: rejected answers show allow-listed locations only ---------------------------------------------
+
+def rejected_view(*locations: str):
+    from opsresolve.explanation import Problem
+    problems = tuple(Problem("schema", location, "message that quotes the answer") for location in locations)
+    return webapp.explanation_view(ai.ExplanationResult("rejected", "EXC-0001", "0" * 64, problems=problems))
+
+
+@pytest.mark.parametrize("location", [
+    "ignore_previous_instructions_and_pay_now", "confirmed_facts[0].x", "confirmed_facts[0].statement.extra",
+    "explanation[0]x", "confirmed_facts[]", "confirmed_facts[-1]", "confirmed_facts[1234]", ".explanation",
+    "explanation.", "Explanation", "confirmed facts", "<img src=x onerror=steal>", "", "root", "(ROOT)",
+    "possible_causes[0].status[0]x", "evidence_refs_used.x",
+])
+def test_unknown_or_malformed_locations_are_replaced(location):
+    view = rejected_view(location)
+    assert view.problems == (("schema", webapp.UNEXPECTED_LOCATION),)
+    assert "quotes the answer" not in " ".join(view_strings(view))
+
+
+@pytest.mark.parametrize("location", [
+    "(root)", "exception_id", "direction", "explanation", "sufficiency",
+    "confirmed_facts", "confirmed_facts[0]", "confirmed_facts[9].statement", "confirmed_facts[0].evidence_refs",
+    "confirmed_facts[0].evidence_refs[19]",
+    "possible_causes[4]", "possible_causes[0].hypothesis", "possible_causes[1].status",
+    "possible_causes[0].supporting_refs[2]", "possible_causes[0].how_to_check",
+    "investigation_steps[7].step", "investigation_steps[0].evidence_refs[0]",
+    "evidence_refs_used", "evidence_refs_used[21]", "missing_information", "missing_information[10]",
+])
+def test_locations_of_the_answer_contract_are_kept(location):
+    assert rejected_view(location).problems == (("schema", location),)
+
+
+def test_the_location_allow_list_is_the_answer_contract():
+    """Derived from ExplanationOutput, and covers every location the validator itself produces."""
+    from opsresolve import explanation
+    expected = {
+        "exception_id", "direction", "explanation", "sufficiency", "confirmed_facts", "confirmed_facts[]",
+        "confirmed_facts[].statement", "confirmed_facts[].evidence_refs", "confirmed_facts[].evidence_refs[]",
+        "possible_causes", "possible_causes[]", "possible_causes[].hypothesis", "possible_causes[].status",
+        "possible_causes[].supporting_refs", "possible_causes[].supporting_refs[]", "possible_causes[].how_to_check",
+        "investigation_steps", "investigation_steps[]", "investigation_steps[].step",
+        "investigation_steps[].evidence_refs", "investigation_steps[].evidence_refs[]", "evidence_refs_used",
+        "evidence_refs_used[]", "missing_information", "missing_information[]", "(root)"}
+    assert webapp._ALLOWED_LOCATIONS == expected
+    output = ai.ExplanationOutput.model_validate(answer("EXC-0001"))
+    produced = [location for location, _, _ in explanation._texts(output)]
+    produced += [location for location, _, _ in explanation._cited(output)]
+    assert produced and all(rejected_view(location).problems == (("schema", location),) for location in produced)
+
+
+def test_schema_errors_from_a_real_answer_have_allowed_locations(offline, supplier_case):
+    result, exc = supplier_case
+    bad = answer(exc.exception_id)
+    bad["confirmed_facts"][0]["evidence_refs"] = ["E1", "not-a-ref"]
+    bad["possible_causes"][0]["status"] = "confirmed"
+    bad["confirmed_facts"][0]["invented"] = "x"
+    view = webapp.request_ai_explanation(result, exc, ready_config(), provider=FakeProvider(json.dumps(bad)))
+    assert view.status == "rejected"
+    assert set(view.problems) == {("schema", "confirmed_facts[0].evidence_refs[1]"),
+                                  ("schema", "possible_causes[0].status"), ("schema", webapp.UNEXPECTED_LOCATION)}
+
+
+# ---- audit fix L2: only known error codes are passed on --------------------------------------------------------
+
+@pytest.mark.parametrize("code, expected", [
+    ("<img src=x onerror=1>", "unexpected"), ("some_new_code", "unexpected"), ("", "unexpected"),
+    (None, "unexpected"), ("timeout", "timeout"), ("privacy_guard", "privacy_guard"),
+])
+def test_error_codes_in_the_view_are_known_or_unexpected(code, expected):
+    outcome = ai.ExplanationResult("error", "EXC-0001", "0" * 64, error_code=code, error_message="secret raw text",
+                                   request_id="req_secret")
+    view = webapp.explanation_view(outcome)
+    assert (view.error_code, view.message) == (expected, webapp.AI_ERROR_MESSAGES.get(expected,
+                                                                                     webapp.AI_UNEXPECTED_MESSAGE))
+    assert "secret" not in " ".join(view_strings(view))
+
+
+@pytest.mark.parametrize("code, expected", [
+    ("<img src=x onerror=1>", "unexpected"), ("some_new_code", "unexpected"), ("rate_limited", "rate_limited")])
+def test_error_codes_in_a_preview_are_known_or_unexpected(offline, supplier_case, monkeypatch, code, expected):
+    result, exc = supplier_case
+
+    def failing(*args, **kwargs):
+        raise ai.ExplanationError(code, f"secret {KEY}", request_id="req_secret")
+
+    monkeypatch.setattr(ai, "preview_request", failing)
+    preview = webapp.preview_ai_request(result, exc, ready_config())
+    assert (preview.body, preview.error_code) == (None, expected)
+    assert preview.message == webapp.AI_ERROR_MESSAGES.get(expected, webapp.AI_UNEXPECTED_MESSAGE)
+    assert "secret" not in preview.message and KEY not in preview.message
+
+
+def test_an_unknown_code_from_a_custom_provider_is_unexpected(offline, supplier_case):
+    result, exc = supplier_case
+    error = ai.ExplanationError("<script>x</script>", f"secret {KEY}")
+    view = webapp.request_ai_explanation(result, exc, ready_config(), provider=FakeProvider(error=error))
+    assert (view.status, view.error_code, view.message) == ("error", "unexpected", webapp.AI_UNEXPECTED_MESSAGE)

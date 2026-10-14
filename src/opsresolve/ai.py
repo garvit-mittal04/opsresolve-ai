@@ -46,6 +46,7 @@ the API key, the prompt, the evidence, supplier names or the model's answer.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -136,6 +137,14 @@ class ExplanationError(Exception):
         self.code = code
         self.message = message
         self.request_id = request_id
+
+
+def sdk_available() -> bool:
+    """Whether the Anthropic SDK is installed. It is located, never imported, so this sends nothing."""
+    try:
+        return importlib.util.find_spec("anthropic") is not None
+    except (ImportError, ValueError):  # a broken installation counts as not available
+        return False
 
 
 def api_key_configured(environ: Mapping[str, str] | None = None) -> bool:

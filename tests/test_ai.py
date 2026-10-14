@@ -953,20 +953,52 @@ def test_explaining_does_not_change_the_investigation(supplier_case):
 # ---- isolation ---------------------------------------------------------------------------------------------------
 
 def imported_modules(path: Path) -> set[str]:
+    """Modules a file imports statically. Relative imports are resolved against the file's package, so
+    "from . import ai" in src/opsresolve/ counts as opsresolve.ai. Dynamic imports (importlib.import_module,
+    __import__) are not seen: this is a static check."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    package = path.parent.name.split(".") if path.parent.name == "opsresolve" else []
     names = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            names.add(node.module)
+        elif isinstance(node, ast.ImportFrom):  # "from opsresolve import ai" counts as opsresolve.ai
+            module = node.module or ""
+            if node.level:  # relative: "." is the file's package, ".." its parent
+                base = package[:len(package) - (node.level - 1)] if node.level - 1 <= len(package) else []
+                module = ".".join([*base, *([module] if module else [])])
+            if module:
+                names.add(module)
+            names.update(f"{module}.{alias.name}" if module else alias.name for alias in node.names)
     return names
 
 
-def test_only_the_ai_module_refers_to_the_sdk_and_nothing_uses_the_ai_module():
+@pytest.mark.parametrize("source", ["from . import ai", "from .ai import explain_exception",
+                                    "from . import config, ai as provider", "import opsresolve.ai",
+                                    "from opsresolve import ai", "from opsresolve.ai import AIConfig"])
+def test_every_static_form_of_importing_the_ai_module_is_detected(tmp_path, source):
+    package = tmp_path / "opsresolve"
+    package.mkdir()
+    module = package / "detection.py"
+    module.write_text(source + "\n", encoding="utf-8")
+    assert "opsresolve.ai" in imported_modules(module)
+
+
+@pytest.mark.parametrize("source", ["from . import config", "from .config import MatchConfig", "import aiohttp",
+                                    "from opsresolve import aide"])
+def test_other_imports_are_not_mistaken_for_the_ai_module(tmp_path, source):
+    package = tmp_path / "opsresolve"
+    package.mkdir()
+    module = package / "detection.py"
+    module.write_text(source + "\n", encoding="utf-8")
+    assert "opsresolve.ai" not in imported_modules(module)
+
+
+def test_only_the_ai_module_refers_to_the_sdk_and_only_the_web_helpers_use_the_ai_module():
+    """webapp.py (helpers for the web app) is the one user; the engine, CLI, reports, evaluation and app.py are not."""
     sources = [*(REPO / "src" / "opsresolve").glob("*.py"), REPO / "app.py"]
     assert [p.name for p in sources if "anthropic" in p.read_text(encoding="utf-8") and p.name != "ai.py"] == []
-    assert [p.name for p in sources if "opsresolve.ai" in imported_modules(p)] == []
+    assert [p.name for p in sources if "opsresolve.ai" in imported_modules(p)] == ["webapp.py"]
     assert "anthropic" not in imported_modules(REPO / "src" / "opsresolve" / "ai.py")  # imported lazily, by name
 
 
@@ -974,6 +1006,27 @@ def test_importing_the_ai_module_does_not_import_the_sdk():
     code = "import sys, opsresolve.ai; print('anthropic' in sys.modules)"
     output = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
     assert output.strip() == "False"
+
+
+def test_sdk_availability_is_checked_without_importing_the_sdk():
+    code = "import sys, opsresolve.ai as ai; ai.sdk_available(); print('anthropic' in sys.modules)"
+    output = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
+    assert output.strip() == "False"
+
+
+@pytest.mark.parametrize("found, expected", [(object(), True), (None, False)])
+def test_sdk_availability_follows_the_module_spec(monkeypatch, found, expected):
+    monkeypatch.setattr(ai.importlib.util, "find_spec", lambda name: found if name == "anthropic" else None)
+    assert ai.sdk_available() is expected
+
+
+@pytest.mark.parametrize("error", [ImportError, ValueError])
+def test_a_broken_sdk_installation_is_not_available(monkeypatch, error):
+    def broken(name):
+        raise error("secret path")
+
+    monkeypatch.setattr(ai.importlib.util, "find_spec", broken)
+    assert ai.sdk_available() is False
 
 
 # ---- the real SDK (needs the ai extra; CI installs it) -------------------------------------------------------------
