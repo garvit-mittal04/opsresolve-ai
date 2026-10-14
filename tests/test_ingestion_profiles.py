@@ -524,3 +524,122 @@ def test_a_very_long_date_gives_a_bounded_message(tmp_path):
     path = eu_po(tmp_path, f"PO-1;1;S1;Supplier;SKU-1;1;1;EUR;{'03.02.2026' * 1000}")
     [issue] = load_purchase_orders(path, profile(EU).format_for("purchase_orders")).issues
     assert issue.field == "order_date" and len(issue.message) < 200 and "(10000 characters)" in issue.message
+
+
+# ---- no profile: profile code is never reached (milestone 7, acceptance gap G1) ---------------------
+# Each profile-only function is replaced, under the name its caller actually uses, by one that fails the
+# test. Ordinary no-profile parsing (pandas.read_csv, the models' own Decimal and date parsing) and
+# helpers the no-profile path legitimately calls (ingestion._issue_value) are deliberately left alone.
+
+import opsresolve.cli as cli_module  # noqa: E402
+import opsresolve.ingestion as ingestion_module  # noqa: E402
+import opsresolve.profiles as profiles_module  # noqa: E402
+import opsresolve.webapp as webapp_module  # noqa: E402
+from opsresolve.config import MatchConfig  # noqa: E402
+
+PROFILE_ONLY = {
+    profiles_module: ("load_profile", "parse_profile", "parse_number", "parse_date"),
+    ingestion_module: ("parse_number", "parse_date", "preview", "canonical_fields", "required_fields",
+                       "numeric_fields", "date_fields", "_read_with_format", "_hint_wrong_delimiter",
+                       "_value_parsers", "_parse_declared_values", "_file_issue"),
+    cli_module: ("load_profile",),
+    webapp_module: ("parse_profile", "check_profile"),
+}
+EVAL_DIR = REPO / "data" / "evaluation"
+SAMPLE_DIR = REPO / "data" / "sample"
+
+
+class ProfileCodeCalled(AssertionError):
+    pass
+
+
+def forbid_profile_code(monkeypatch) -> list[str]:
+    """Make every profile-only function fail if called; returns the list of attempted calls."""
+    calls: list[str] = []
+    for module, names in PROFILE_ONLY.items():
+        for name in names:
+            assert callable(getattr(module, name)), f"{module.__name__}.{name} is not a function"
+            qualified = f"{module.__name__}.{name}"
+
+            def refuse(*args, _name=qualified, **kwargs):
+                calls.append(_name)
+                raise ProfileCodeCalled(f"profile-only code called without a profile: {_name}")
+            monkeypatch.setattr(module, name, refuse)
+    return calls
+
+
+def run_folder(folder: Path, with_uom: bool):
+    paths = [folder / f"{n}.csv" for n in FILES]
+    return investigate_files(*paths, uom_conversions_path=folder / "uom_conversions.csv" if with_uom else None)
+
+
+def outcome(result) -> tuple:
+    dataset = result.dataset
+    loads = [dataset.purchase_orders, dataset.invoices, dataset.goods_received, dataset.uom_conversions]
+    return ([e.model_dump() for e in result.exceptions], [i.model_dump() for i in dataset.issues],
+            [None if load is None else (load.records, load.rows_read, load.rejected_keys, load.file_format)
+             for load in loads], result.profile)
+
+
+@pytest.mark.parametrize("folder, with_uom", [(SAMPLE_DIR, False), (EVAL_DIR, True)], ids=["sample", "evaluation"])
+def test_no_profile_ingestion_and_pipeline_never_reach_profile_code(monkeypatch, folder, with_uom):
+    expected = outcome(run_folder(folder, with_uom))
+    expected_dataset = load_dataset(*[folder / f"{n}.csv" for n in FILES],
+                                    folder / "uom_conversions.csv" if with_uom else None)
+    calls = forbid_profile_code(monkeypatch)
+    assert outcome(run_folder(folder, with_uom)) == expected
+    dataset = load_dataset(*[folder / f"{n}.csv" for n in FILES], folder / "uom_conversions.csv" if with_uom else None)
+    assert [i.model_dump() for i in dataset.issues] == [i.model_dump() for i in expected_dataset.issues]
+    assert dataset.profile is None and (dataset.uom_conversions is not None) == with_uom
+    assert calls == []
+
+
+def _cli_outputs(capsys, out_dir: Path, *args) -> tuple:
+    code = cli_module.main([*map(str, args), "--output-dir", str(out_dir)])
+    console = capsys.readouterr().out.replace(str(out_dir), "<out>")
+    markdown = [line for line in (out_dir / "exception_report.md").read_text(encoding="utf-8").splitlines()
+                if not line.startswith("Generated:")]
+    csvs = [(out_dir / name).read_bytes() for name in ("exceptions.csv", "validation_issues.csv")]
+    return code, console, markdown, csvs
+
+
+@pytest.mark.parametrize("folder", [SAMPLE_DIR, EVAL_DIR], ids=["sample", "evaluation"])
+def test_cli_without_profile_never_loads_or_parses_a_profile(monkeypatch, capsys, tmp_path, folder):
+    # The evaluation folder's uom_conversions.csv is found automatically, as before.
+    expected = _cli_outputs(capsys, tmp_path / "before", "--data-dir", folder)
+    calls = forbid_profile_code(monkeypatch)
+    assert _cli_outputs(capsys, tmp_path / "after", "--data-dir", folder) == expected
+    assert folder != EVAL_DIR or "uom_conversions  rows=3    accepted=3    rejected=0" in expected[1].splitlines()
+    assert "Import profile" not in expected[1]
+    assert calls == []
+
+
+@pytest.mark.parametrize("folder, with_uom", [(SAMPLE_DIR, False), (EVAL_DIR, True)], ids=["sample", "evaluation"])
+def test_web_app_without_profile_never_reaches_profile_code(monkeypatch, folder, with_uom):
+    uploads = {spec.key: webapp_module.Upload(spec.internal_name, (folder / spec.internal_name).read_bytes())
+               for spec in webapp_module.INPUTS if spec.required or with_uom}
+    uploads.setdefault("uom_conversions", None)
+    expected = outcome(webapp_module.run_reconciliation(uploads, MatchConfig()))
+    expected_fingerprint = webapp_module.fingerprint(uploads, MatchConfig())
+    calls = forbid_profile_code(monkeypatch)
+    assert outcome(webapp_module.run_reconciliation(uploads, MatchConfig())) == expected
+    assert not with_uom or expected[2][3] is not None  # the conversion upload was loaded
+    assert webapp_module.fingerprint(uploads, MatchConfig()) == expected_fingerprint
+    assert webapp_module.fingerprint(uploads, MatchConfig(), None) == expected_fingerprint
+    assert calls == []
+
+
+def test_the_forbidding_patches_are_wired_to_the_names_actually_called(monkeypatch, tmp_path, capsys):
+    """Positive control: with a profile, the same patches are hit, so the tests above are not vacuous."""
+    profile = load_profile(FIXTURES / "erp_profile.json")
+    calls = forbid_profile_code(monkeypatch)
+    with pytest.raises(ProfileCodeCalled):
+        load_invoices(FIXTURES / "erp" / "invoices.csv", profile.format_for("invoices"))
+    with pytest.raises(ProfileCodeCalled):
+        cli_module.main(["--data-dir", str(FIXTURES / "erp"), "--profile", str(FIXTURES / "erp_profile.json"),
+                         "--output-dir", str(tmp_path)])
+    with pytest.raises(ProfileCodeCalled):
+        webapp_module.check_profile(webapp_module.Upload("p.json", b"{}"))
+    assert calls == ["opsresolve.ingestion._read_with_format", "opsresolve.cli.load_profile",
+                     "opsresolve.webapp.check_profile"]
+    assert not (tmp_path / "exception_report.md").exists()
