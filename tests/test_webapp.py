@@ -440,3 +440,147 @@ def test_integer_and_invalid_settings():
 
 def test_settings_cover_every_engine_setting():
     assert {s.field for s in webapp.SETTINGS} == set(MatchConfig.model_fields)
+
+
+# ---- import profiles (milestone 7, stage 4a) ------------------------------------------------------
+# Expected values are derived by hand from the fixtures in tests/fixtures/profiles/ (see the stage 2 tests).
+
+import hashlib  # noqa: E402
+import json  # noqa: E402
+
+from opsresolve import profiles  # noqa: E402
+from opsresolve.profiles import load_profile  # noqa: E402
+
+PROFILE_FIXTURES = REPO / "tests" / "fixtures" / "profiles"
+ERP_DIR = PROFILE_FIXTURES / "erp"
+ERP_PROFILE = PROFILE_FIXTURES / "erp_profile.json"
+ERP_NAME = "Fictional ERP export (test fixture)"
+HOSTILE_NAME = "<img src=x onerror=alert(1)> **bold** [link](javascript:x) `code` | # _x_ &amp;"
+
+
+def profile_upload(data: bytes, name: str = "profile.json") -> Upload:
+    return Upload(name, data)
+
+
+def json_profile(**body) -> bytes:
+    return json.dumps({"profile_version": 1, "name": "Test", **body}).encode()
+
+
+def legacy_fingerprint(files, config) -> str:
+    """The fingerprint algorithm as it was before import profiles (milestone 6), for comparison."""
+    digest = hashlib.sha256()
+    for spec in INPUTS:
+        upload = files.get(spec.key)
+        digest.update(spec.key.encode())
+        digest.update(b"\x00" if upload is None else hashlib.sha256(upload.data).digest())
+    digest.update(config.model_dump_json().encode())
+    return digest.hexdigest()
+
+
+def test_check_profile_accepts_the_fixture_profile():
+    data = ERP_PROFILE.read_bytes()
+    check = webapp.check_profile(profile_upload(data, "../../etc/erp.json"))
+    assert check.valid and check.problems == ()
+    assert check.profile.name == ERP_NAME
+    assert check.profile.sha256 == hashlib.sha256(data).hexdigest()
+
+
+@pytest.mark.parametrize("data, problem", [
+    (b'{"profile_version": 1,', "profile file: is not valid JSON"),
+    (b"\xff\xfe{}", "profile file: is not UTF-8 text"),
+    (b" " * (profiles.MAX_PROFILE_BYTES + 1),
+     f"profile file: is {profiles.MAX_PROFILE_BYTES + 1} bytes; the limit is"),
+    (json_profile(defaults={"thousands_separator": ","}),
+     "defaults: the delimiter ',' must not also be a decimal or thousands separator"),
+    (json_profile(defaults={"decimal_separator": ",", "thousands_separator": ","}),
+     "defaults: decimal_separator and thousands_separator must differ (both ',')"),
+])
+def test_check_profile_reports_invalid_profiles(data, problem):
+    check = webapp.check_profile(profile_upload(data))
+    assert not check.valid and check.profile is None
+    assert any(p.startswith(problem) for p in check.problems), check.problems
+
+
+def test_check_profile_collects_every_problem():
+    check = webapp.check_profile(profile_upload(json.dumps({"profile_version": 2, "name": ""}).encode()))
+    assert check.problems == ("name: must be a non-empty string", "profile_version: must be 1")
+
+
+def test_run_with_a_profile_matches_the_pipeline_used_by_the_cli():
+    profile = load_profile(ERP_PROFILE)
+    via_app = run_reconciliation(from_dir(ERP_DIR, with_uom=True), MatchConfig(), profile)
+    direct = investigate_files(*[ERP_DIR / f"{s.key}.csv" for s in INPUTS if s.required], MatchConfig(),
+                               uom_conversions_path=ERP_DIR / "uom_conversions.csv", profile=profile)
+    assert via_app.profile is profile
+    assert [e.model_dump() for e in via_app.exceptions] == [e.model_dump() for e in direct.exceptions]
+    assert via_app.dataset.issues == direct.dataset.issues == []
+    for spec in INPUTS:
+        assert getattr(via_app.dataset, spec.key).records == getattr(direct.dataset, spec.key).records
+    amounts = {(e.exception_type, e.sku): e.amount_impact for e in via_app.exceptions}
+    # (12.75 - 12.50) x 1200 and (10 - 8) x 1234.56
+    assert amounts == {(ExceptionType.PRICE_MISMATCH, "A-100"): Decimal("300.00"),
+                       (ExceptionType.QUANTITY_MISMATCH, "B-200"): Decimal("2469.12")}
+
+
+def test_the_same_export_without_its_profile_loads_nothing():
+    result = run_reconciliation(from_dir(ERP_DIR, with_uom=True), MatchConfig())
+    assert result.profile is None
+    assert [len(getattr(result.dataset, s.key).records) for s in INPUTS] == [0, 0, 0, 0]
+
+
+def test_no_profile_fingerprint_is_unchanged():
+    for files, config in [(uploads(), MatchConfig()), (uploads(uom="sku,uom,base_uom,units_per_uom\n"),
+                                                       MatchConfig(quantity_tolerance=Decimal("1"))),
+                          (sample_uploads(), MatchConfig())]:
+        assert fingerprint(files, config) == fingerprint(files, config, None) == legacy_fingerprint(files, config)
+
+
+def test_fingerprint_changes_when_a_profile_is_added_changed_or_removed():
+    files, config = uploads(), MatchConfig()
+    base = fingerprint(files, config)
+    valid = profile_upload(ERP_PROFILE.read_bytes())
+    edited = profile_upload(ERP_PROFILE.read_bytes().replace(b"test fixture", b"test fixture 2"))
+    invalid = profile_upload(b'{"profile_version": 1,')
+    other_invalid = profile_upload(b'{"profile_version": 2,')
+    states = [fingerprint(files, config, p) for p in (valid, edited, invalid, other_invalid)]
+    assert base not in states and len(set(states)) == len(states)
+    # Same bytes under another file name: the same profile, so the same fingerprint.
+    assert fingerprint(files, config, profile_upload(valid.data, "renamed.json")) == states[0]
+    # Removing the profile returns to the no-profile value.
+    assert fingerprint(files, config, None) == base
+
+
+def test_profile_caption_shows_the_escaped_name_and_short_hash():
+    profile = load_profile(ERP_PROFILE)
+    short = hashlib.sha256(ERP_PROFILE.read_bytes()).hexdigest()[:12]
+    expected = f"Import profile: Fictional ERP export \\(test fixture\\) (sha256 {short})"
+    assert webapp.profile_caption(profile) == expected
+    assert webapp.profile_caption(profile, "Import profile loaded").startswith("Import profile loaded: Fictional")
+
+
+def test_hostile_profile_names_are_escaped_but_not_changed():
+    data = json_profile(name=HOSTILE_NAME)
+    profile = webapp.check_profile(profile_upload(data)).profile
+    assert profile.name == HOSTILE_NAME and profile.sha256 == hashlib.sha256(data).hexdigest()
+    caption = webapp.profile_caption(profile)
+    shown = caption[len("Import profile: "):caption.rindex(" (sha256 ")]
+    assert shown == webapp.escape_markdown(HOSTILE_NAME)
+    # Every character with a meaning in Markdown or HTML is preceded by a backslash.
+    for index, char in enumerate(shown):
+        if char in "<>*[]()`|#_&!":
+            assert shown[index - 1] == "\\", (index, char)
+    assert caption.endswith(f"(sha256 {profile.sha256[:12]})")
+
+
+def test_markdown_download_names_the_profile_and_csv_columns_are_unchanged():
+    profile = load_profile(ERP_PROFILE)
+    with_profile = run_reconciliation(from_dir(ERP_DIR, with_uom=True), MatchConfig(), profile)
+    without = run_reconciliation(from_dir(PROFILE_FIXTURES / "canonical", with_uom=True), MatchConfig())
+    report = summary_markdown(with_profile).decode()
+    assert report.count("Import profile: ") == 1
+    assert f"Import profile: Fictional ERP export \\(test fixture\\) (sha256 {profile.sha256[:12]})" in report
+    assert "Import profile" not in summary_markdown(without).decode()
+    for build in (exceptions_csv, validation_csv):
+        assert build(with_profile).splitlines()[0] == build(without).splitlines()[0]
+    # Same data in both formats: identical downloadable exception rows.
+    assert exceptions_csv(with_profile) == exceptions_csv(without)

@@ -3,6 +3,7 @@ beyond counting and grouping already-computed exceptions."""
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from decimal import Decimal
 from pathlib import Path
@@ -12,6 +13,12 @@ import pandas as pd
 from opsresolve.detection import fmt_money, fmt_qty
 from opsresolve.models import ExceptionType, Severity
 from opsresolve.pipeline import InvestigationResult
+from opsresolve.profiles import ImportProfile
+
+# Shown after "sha256" to identify the exact profile file a run used.
+PROFILE_HASH_CHARS = 12
+# Characters with a meaning in Markdown; the profile name comes from a user-supplied file.
+_MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~:$^=&])")
 
 
 def _summary_rows(result: InvestigationResult) -> list[tuple[str, int, int, int]]:
@@ -40,6 +47,9 @@ def render_markdown(result: InvestigationResult) -> str:
     add(f"Rules: price tolerance {cfg.price_tolerance_pct}% / {cfg.price_tolerance_abs} absolute; "
         f"quantity tolerance {cfg.quantity_tolerance}; duplicate window {cfg.duplicate_window_days} days.")
     add("")
+    if result.profile is not None:
+        add(_profile_line(result.profile, _MARKDOWN_SPECIAL.sub(r"\\\1", result.profile.name)))
+        add("")
     add("> All figures are calculated by deterministic rules from the input files. "
         "Root causes are not asserted; each exception lists the evidence and a recommended next step.")
     add("")
@@ -126,6 +136,10 @@ def render_markdown(result: InvestigationResult) -> str:
     return "\n".join(out) + "\n"
 
 
+def _profile_line(profile: ImportProfile, shown_name: str) -> str:
+    return f"Import profile: {shown_name} (sha256 {profile.sha256[:PROFILE_HASH_CHARS]})"
+
+
 def _cell(value: str | None) -> str:
     return "" if value is None else str(value).replace("|", "\\|").replace("\n", " ")
 
@@ -163,6 +177,8 @@ def validation_frame(result: InvestigationResult) -> pd.DataFrame:
 
 def render_console(result: InvestigationResult) -> str:
     out = []
+    if result.profile is not None:
+        out.append(_profile_line(result.profile, result.profile.name))
     for label, read, accepted, rejected in _summary_rows(result):
         out.append(f"{label:<16} rows={read:<4} accepted={accepted:<4} rejected={rejected}")
     out.append(f"validation issues: {len(result.dataset.issues)}")

@@ -13,6 +13,8 @@ Safety properties:
   directory.
 * CSV downloads neutralise spreadsheet formulas (see ``neutralize_cell``). The
   CLI's report files are not affected.
+* An uploaded import profile is parsed from memory and never written to disk.
+  Its name comes from the user, so it is shown escaped (see ``profile_caption``).
 """
 
 from __future__ import annotations
@@ -33,7 +35,8 @@ from opsresolve.config import MatchConfig
 from opsresolve.ingestion import GOODS_RECEIVED, INVOICES, PURCHASE_ORDERS, REQUIRED_COLUMNS, UOM_CONVERSIONS
 from opsresolve.models import ExceptionType, OpsException, Severity
 from opsresolve.pipeline import InvestigationResult, investigate_files
-from opsresolve.reporting import exceptions_frame, render_markdown, validation_frame
+from opsresolve.profiles import ImportProfile, ProfileError, parse_profile
+from opsresolve.reporting import PROFILE_HASH_CHARS, exceptions_frame, render_markdown, validation_frame
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SAMPLE_DIR = REPO_ROOT / "data" / "sample"
@@ -95,12 +98,15 @@ class MissingInputError(ValueError):
 # Running the pipeline
 # --------------------------------------------------------------------------- #
 
-def run_reconciliation(uploads: Mapping[str, Upload | None], config: MatchConfig) -> InvestigationResult:
+def run_reconciliation(
+    uploads: Mapping[str, Upload | None], config: MatchConfig, profile: ImportProfile | None = None,
+) -> InvestigationResult:
     """Run the existing pipeline on uploaded bytes.
 
     Raises MissingInputError (before touching the filesystem) if a required file
     is absent. Validation problems inside files are not errors here: the pipeline
-    reports them as validation issues.
+    reports them as validation issues. ``profile`` (optional, already validated)
+    declares the format of every file; without it the built-in format is used.
     """
     missing = [spec.label for spec in INPUTS if spec.required and uploads.get(spec.key) is None]
     if missing:
@@ -117,9 +123,11 @@ def run_reconciliation(uploads: Mapping[str, Upload | None], config: MatchConfig
             path = folder / spec.internal_name  # fixed name: the upload's own name is never used
             path.write_bytes(upload.data)
             paths[spec.key] = path
+        # Without a profile, the pipeline is called exactly as before import profiles existed.
+        with_profile = {} if profile is None else {"profile": profile}
         return investigate_files(
             paths[PURCHASE_ORDERS], paths[INVOICES], paths[GOODS_RECEIVED], config,
-            uom_conversions_path=paths[UOM_CONVERSIONS],
+            uom_conversions_path=paths[UOM_CONVERSIONS], **with_profile,
         )
 
 
@@ -183,15 +191,53 @@ def config_from_inputs(values: Mapping[str, float | int], decimals: Mapping[str,
     return MatchConfig(**settings)
 
 
-def fingerprint(uploads: Mapping[str, Upload | None], config: MatchConfig) -> str:
-    """Identifies one combination of inputs and settings; any change gives a new value."""
+def fingerprint(
+    uploads: Mapping[str, Upload | None], config: MatchConfig, profile_upload: Upload | None = None,
+) -> str:
+    """Identifies one combination of inputs, settings and import profile; any change gives a new value.
+
+    The profile's bytes count whether or not they are valid. Without a profile the value is
+    exactly what it was before import profiles existed.
+    """
     digest = hashlib.sha256()
     for spec in INPUTS:
         upload = uploads.get(spec.key)
         digest.update(spec.key.encode())
         digest.update(b"\x00" if upload is None else hashlib.sha256(upload.data).digest())
     digest.update(config.model_dump_json().encode())
+    if profile_upload is not None:
+        digest.update(b"import_profile")
+        digest.update(hashlib.sha256(profile_upload.data).digest())
     return digest.hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Import profiles
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class ProfileCheck:
+    """An uploaded import profile after validation: ``profile`` when valid, otherwise ``problems``."""
+
+    profile: ImportProfile | None
+    problems: tuple[str, ...] = ()
+
+    @property
+    def valid(self) -> bool:
+        return self.profile is not None
+
+
+def check_profile(upload: Upload) -> ProfileCheck:
+    """Validate an uploaded profile from its bytes, collecting every problem (nothing is written)."""
+    try:
+        return ProfileCheck(parse_profile(upload.data))
+    except ProfileError as exc:
+        return ProfileCheck(None, tuple(exc.problems))
+
+
+def profile_caption(profile: ImportProfile, prefix: str = "Import profile") -> str:
+    """'<prefix>: <name> (sha256 <12 hex>)', with the user-supplied name escaped for Markdown."""
+    return f"{prefix}: {escape_markdown(profile.name)} (sha256 {profile.sha256[:PROFILE_HASH_CHARS]})"
 
 
 # --------------------------------------------------------------------------- #

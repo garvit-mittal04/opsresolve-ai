@@ -1,0 +1,61 @@
+{
+  "profile_version": 1,
+  "name": "Example ERP export (semicolon, decimal comma)",
+  "defaults": {
+    "delimiter": ";",
+    "encoding": "cp1252",
+    "date_format": "DD.MM.YYYY",
+    "decimal_separator": ",",
+    "thousands_separator": "."
+  },
+  "files": {
+    "purchase_orders": {
+      "columns": {
+        "po_number": "PO Number",
+        "line_number": "Line",
+        "supplier_id": "Supplier ID",
+        "supplier_name": "Supplier Name",
+        "sku": "Item Code",
+        "description": "Item Description",
+        "quantity_ordered": "Ordered Qty",
+        "unit_price": "Unit Price",
+        "currency": "Currency",
+        "order_date": "Order Date",
+        "unit_of_measure": "UoM"
+      }
+    },
+    "invoices": {
+      "columns": {
+        "invoice_number": "Invoice Number",
+        "invoice_date": "Invoice Date",
+        "supplier_id": "Supplier ID",
+        "po_number": "PO Number",
+        "sku": "Item Code",
+        "quantity_invoiced": "Invoiced Qty",
+        "unit_price": "Unit Price",
+        "currency": "Currency",
+        "unit_of_measure": "UoM"
+      }
+    },
+    "goods_received": {
+      "date_format": "YYYY-MM-DD",
+      "columns": {
+        "grn_number": "GRN Number",
+        "received_date": "Received Date",
+        "supplier_id": "Supplier ID",
+        "po_number": "PO Number",
+        "sku": "Item Code",
+        "quantity_received": "Received Qty",
+        "unit_of_measure": "UoM"
+      }
+    },
+    "uom_conversions": {
+      "columns": {
+        "sku": "Item Code",
+        "uom": "Unit",
+        "base_uom": "Base Unit",
+        "units_per_uom": "Units per Unit"
+      }
+    }
+  }
+}

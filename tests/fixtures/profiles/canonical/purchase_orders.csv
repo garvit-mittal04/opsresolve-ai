@@ -1,0 +1,3 @@
+po_number,line_number,supplier_id,supplier_name,sku,description,quantity_ordered,unit_price,currency,order_date,unit_of_measure
+PO-9001,1,SUP-77,Brückner Metallwaren GmbH,A-100,Stahlwinkel 40 mm,1200,12.50,EUR,2026-02-03,EA
+PO-9001,2,SUP-77,Brückner Metallwaren GmbH,B-200,Schweißdraht,10,1234.56,EUR,2026-02-03,EA

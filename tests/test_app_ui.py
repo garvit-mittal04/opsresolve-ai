@@ -69,7 +69,10 @@ def test_initial_page_waits_for_required_files():
     assert at.button(key="run_button").disabled
     assert "Purchase orders, Supplier invoices, Goods receipts" in " ".join(c.value for c in at.caption)
     assert not at.metric and not at.tabs
-    assert len(at.download_button) == 4  # one template per input file
+    # One template per input file, plus the example import profile.
+    assert [d.key for d in at.download_button] == [
+        "template_purchase_orders", "template_invoices", "template_goods_received", "template_uom_conversions",
+        "example_profile"]
 
 
 def test_optional_conversion_file_is_not_required():
@@ -311,3 +314,188 @@ def test_validation_view_shows_the_current_file_name():
     validation = next(d.value for d in at.dataframe if "Problem" in d.value.columns)
     assert list(validation["File"]) == ["orders_march_final.csv"]
     assert metrics(at)["Validation issues"] == "1"
+
+
+# ---- import profiles (milestone 7, stage 4b) --------------------------------------------------------
+# Expected values are derived by hand from the fixtures in tests/fixtures/profiles/ (see the stage 2 tests).
+
+import hashlib  # noqa: E402
+import json  # noqa: E402
+
+from opsresolve.profiles import load_profile  # noqa: E402
+
+PROFILE_FIXTURES = REPO / "tests" / "fixtures" / "profiles"
+ERP_PROFILE = PROFILE_FIXTURES / "erp_profile.json"
+ERP_SHORT_HASH = hashlib.sha256(ERP_PROFILE.read_bytes()).hexdigest()[:12]
+EXAMPLE_PROFILE = REPO / "docs" / "examples" / "import-profile-example.json"
+HOSTILE_NAME = "<img src=x onerror=alert(1)> **bold** [link](javascript:x) `code` | # _x_ &amp;"
+FILE_KEYS = ("purchase_orders", "invoices", "goods_received", "uom_conversions")
+
+
+def upload_folder(at: AppTest, folder: Path) -> AppTest:
+    for key in FILE_KEYS:
+        at.file_uploader(key=f"upload_{key}").upload(f"{key}.csv", (folder / f"{key}.csv").read_bytes(), "text/csv")
+    return at.run()
+
+
+def upload_profile(at: AppTest, data: bytes, name: str = "profile.json") -> AppTest:
+    at.file_uploader(key="upload_profile").upload(name, data, "application/json")
+    return at.run()
+
+
+def json_profile(**body) -> bytes:
+    return json.dumps({"profile_version": 1, "name": "Test", **body}).encode()
+
+
+def keys(widgets) -> set:
+    return {w.key for w in widgets}
+
+
+def texts(at: AppTest) -> list[str]:
+    """Every piece of text the page renders as Markdown (markdown, captions and alerts)."""
+    return [e.value for group in (at.markdown, at.caption, at.success, at.error, at.info, at.warning) for e in group]
+
+
+def document_order(at: AppTest) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+
+    def walk(node):
+        for child in getattr(node, "children", {}).values():
+            if getattr(child, "type", None) in ("markdown", "metric", "alert"):
+                out.append((child.type, str(getattr(child, "value", ""))))
+            walk(child)
+    walk(at.main)
+    return out
+
+
+def test_profile_uploader_appears_only_in_upload_mode():
+    at = start()
+    assert "upload_profile" in keys(at.file_uploader)
+    assert "What is an import profile?" in [e.proto.label for e in at.expander]
+    at = use_sample(at)
+    no_errors(at)
+    assert "upload_profile" not in keys(at.file_uploader)
+    assert "example_profile" not in keys(at.download_button)
+    assert not any("import profile" in t.lower() for t in texts(at))
+
+
+def test_example_profile_offered_for_download_is_valid():
+    at = start()
+    assert "example_profile" in keys(at.download_button)
+    profile = load_profile(EXAMPLE_PROFILE)
+    assert profile.name == "Example ERP export (semicolon, decimal comma)"
+    assert profile.format_for("purchase_orders").delimiter == ";"
+    assert profile.format_for("goods_received").date_format == "YYYY-MM-DD"  # a per-file override
+    caption = " ".join(c.value for c in at.caption)
+    assert "With a valid import profile, files are read in the formats it declares" in caption
+
+
+def test_valid_profile_feedback_run_and_provenance_above_the_metrics():
+    at = upload_profile(upload_folder(start(), PROFILE_FIXTURES / "erp"), ERP_PROFILE.read_bytes(), "erp.json")
+    no_errors(at)
+    assert [s.value for s in at.success] == [
+        f"Import profile loaded: Fictional ERP export \\(test fixture\\) (sha256 {ERP_SHORT_HASH})"]
+    assert not at.button(key="run_button").disabled
+    at = run(at)
+    no_errors(at)
+    # 2 + 2 + 2 + 1 rows; the price (A-100) and quantity (B-200) exceptions of the fixture.
+    assert metrics(at) == {"Rows read": "7", "Validation issues": "0", "Exceptions": "2",
+                           "High severity": "1", "Medium severity": "1", "Low severity": "0"}
+    provenance = f"Import profile: Fictional ERP export \\(test fixture\\) (sha256 {ERP_SHORT_HASH})"
+    order = document_order(at)
+    assert ("markdown", provenance) in order
+    first_metric = next(i for i, (kind, _) in enumerate(order) if kind == "metric")
+    assert order.index(("markdown", provenance)) < first_metric
+    # The same files without the profile load no rows: the profile was really applied.
+    at.file_uploader(key="upload_profile").clear()
+    at = run(at.run())
+    assert metrics(at)["Rows read"] == "0"
+    assert not any(t.startswith("Import profile:") for t in texts(at))
+
+
+def test_invalid_profile_lists_problems_as_plain_text_and_disables_run():
+    data = json.dumps({"profile_version": 1, "name": "x", "<b>bold</b>": 1,
+                       "defaults": {"thousands_separator": ","}}).encode()
+    at = upload_profile(upload_folder(start(), PROFILE_FIXTURES / "canonical"), data)
+    no_errors(at)
+    assert at.button(key="run_button").disabled
+    assert [e.value for e in at.error] == [
+        "The import profile is not valid (2 problem(s)). Fix or remove it to run."]
+    problems = list(at.dataframe[0].value["Problem"])
+    assert problems == [
+        "profile: unknown key '<b>bold</b>' (allowed: profile_version, name, defaults, files)",
+        "defaults: the delimiter ',' must not also be a decimal or thousands separator",
+    ]
+    assert any(c.value.startswith("Waiting for a valid import profile") for c in at.caption)
+    assert not at.success
+    # Removing the invalid profile enables Run again.
+    at.file_uploader(key="upload_profile").clear()
+    assert not at.run().button(key="run_button").disabled
+
+
+@pytest.mark.parametrize("data", [b'{"profile_version": 1,', b"\xff\xfe", b" " * 70_000])
+def test_malformed_undecodable_or_oversized_profiles_disable_run(data):
+    at = upload_profile(upload_folder(start(), PROFILE_FIXTURES / "canonical"), data)
+    no_errors(at)
+    assert at.button(key="run_button").disabled
+    assert len(at.error) == 1 and len(at.dataframe[0].value) == 1
+
+
+def test_run_stays_disabled_for_missing_files_even_with_a_valid_profile():
+    at = upload_profile(start(), ERP_PROFILE.read_bytes())
+    assert at.success and at.button(key="run_button").disabled
+    assert any(c.value.startswith("Waiting for: Purchase orders") for c in at.caption)
+
+
+@pytest.mark.parametrize("change", ["add", "edit", "replace with invalid", "remove"])
+def test_any_profile_change_clears_previous_results(change):
+    canonical = PROFILE_FIXTURES / "canonical"
+    named = json_profile(name="Built-in layout")  # declares nothing else: the built-in format
+    at = upload_folder(start(), canonical)
+    if change != "add":
+        at = upload_profile(at, named)
+    at = run(at)
+    assert at.metric and at.tabs
+    if change == "add":
+        at = upload_profile(at, named)
+    elif change == "edit":
+        at = upload_profile(at, json_profile(name="Built-in layout, edited"))
+    elif change == "replace with invalid":
+        at = upload_profile(at, b"{")
+    else:
+        at.file_uploader(key="upload_profile").clear()
+        at = at.run()
+    no_errors(at)
+    assert not at.metric and not at.tabs
+    assert any(i.value.startswith("Inputs or settings changed since the last run") for i in at.info)
+
+
+def test_unchanged_profile_keeps_results():
+    at = run(upload_profile(upload_folder(start(), PROFILE_FIXTURES / "canonical"), json_profile()))
+    at = upload_profile(at, json_profile(), "renamed.json")  # same bytes, new file name
+    assert at.metric and not any(i.value.startswith("Inputs or settings changed") for i in at.info)
+
+
+def test_hostile_profile_name_is_never_rendered_unescaped():
+    data = json_profile(name=HOSTILE_NAME)
+    at = run(upload_profile(upload_folder(start(), PROFILE_FIXTURES / "canonical"), data, "<script>.json"))
+    no_errors(at)
+    escaped = webapp.escape_markdown(HOSTILE_NAME)
+    short = hashlib.sha256(data).hexdigest()[:12]
+    assert f"Import profile loaded: {escaped} (sha256 {short})" in [s.value for s in at.success]
+    assert f"Import profile: {escaped} (sha256 {short})" in [m.value for m in at.markdown]
+    rendered = texts(at)
+    for raw in ("<img", "**bold**", "[link](", "`code`", "&amp;", "<script>"):
+        pattern = re.compile(r"(?<!\\)" + re.escape(raw[0]) + re.escape(raw[1:]))
+        assert not any(pattern.search(t) for t in rendered), raw
+    # Only the fixed severity badges and page style may use HTML; nothing containing the name does.
+    assert not any(m.proto.allow_html and "img" in m.value for m in at.markdown)
+
+
+def test_sample_mode_ignores_an_uploaded_profile():
+    at = upload_profile(start(), ERP_PROFILE.read_bytes())
+    assert at.success
+    at = run(use_sample(at))
+    no_errors(at)
+    assert metrics(at)["Exceptions"] == "18" and metrics(at)["Validation issues"] == "3"
+    assert not at.success and not any(t.startswith("Import profile") for t in texts(at))
