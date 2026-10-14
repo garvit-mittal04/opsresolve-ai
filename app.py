@@ -9,6 +9,11 @@ This file only lays out the page. Reconciliation is done by the existing
 pipeline through ``opsresolve.webapp``; no business rules live here. Text that
 comes from uploaded files is shown in tables or escaped, never as raw Markdown.
 
+Investigation checks (candidate explanations from a fixed catalogue, checked
+locally and deterministically against the loaded records) are computed once per
+run and shown in the detail panel as table cells and ``st.text``; a failed check
+shows its fixed label only.
+
 Optional AI explanations are off until the user turns them on, and a request is
 sent only when the user presses the send button for one finding. Text written by
 the model is shown literally (``st.text`` and table cells), the request preview
@@ -98,6 +103,49 @@ def ai_sidebar() -> webapp.AIStatus | None:
             st.caption(f"A request is given up after {status.config.timeout_seconds:g} seconds and retried "
                        f"{status.config.max_retries} time(s).")
         return status
+
+
+def show_investigation(run: webapp.InvestigationRun | None, exception_id: str, names: dict[str, str]) -> None:
+    """The deterministic investigation checks of one finding. Text from the checks and the uploaded files only in
+    table cells and st.text; labels and messages are fixed text. A failed check shows its fixed label only."""
+    st.markdown("**Investigation checks** (deterministic; candidate explanations, never confirmed causes)")
+    if run is None:
+        return
+    if run.message is not None:
+        st.info(esc(run.message))
+        return
+    view = run.views.get(exception_id)
+    if view is None or view.not_run:
+        st.warning(esc(webapp.INVESTIGATION_NOT_RUN))
+        return
+    if not view.checks:
+        st.caption(esc(webapp.INVESTIGATION_NONE))
+        return
+    st.caption("Consistent with the data — not confirmed: the records match the explanation, but a person must "
+               "verify it. Contradicted by the data: comparable records exist and none fits. Can't be checked: the "
+               "records needed are missing, rejected, in other units or not conclusive.")
+    evidence = [check for check in view.checks if not check.failed]
+    if evidence:
+        st.dataframe(pd.DataFrame([{"Check": c.id, "Candidate explanation": c.statement, "Status": c.label}
+                                   for c in evidence]), hide_index=True, width="stretch")
+    for check in view.checks:
+        if check.failed:  # an operational failure, not evidence: the fixed label only
+            st.warning(esc(f"{check.id}: {webapp.CHECK_FAILED_LABEL}"))
+    for check in evidence:
+        with st.expander(f"{check.id}: details"):
+            st.text(f"{check.statement} — {check.label}")
+            if check.observations:
+                rows = [{"Observation": text, "Records": refs} for text, refs in check.observations]
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            if check.missing:
+                st.dataframe(pd.DataFrame({"Needed to decide": list(check.missing)}), hide_index=True, width="stretch")
+            st.caption("How to confirm")
+            st.text(check.how_to_confirm)
+    if view.records:
+        st.caption("Records cited by the checks (line numbers in the uploaded files; the header is line 1)")
+        st.dataframe(pd.DataFrame([{"Ref": r.ref, "File": webapp.literal_text(names.get(r.file, r.file)), "Line": r.line,
+                                    "Reference": r.reference} for r in view.records]),
+                     hide_index=True, width="stretch")
 
 
 def show_ai_view(view: webapp.AIExplanationView) -> None:
@@ -239,7 +287,9 @@ def show_summary(summary: webapp.RunSummary) -> None:
             st.caption("No exceptions detected.")
 
 
-def show_exceptions(result, ai_status: webapp.AIStatus | None = None, run_key: str = "") -> None:
+def show_exceptions(result, ai_status: webapp.AIStatus | None = None, run_key: str = "",
+                    investigations: webapp.InvestigationRun | None = None,
+                    names: dict[str, str] | None = None) -> None:
     exceptions = result.exceptions
     if not exceptions:
         st.info("No exceptions were detected by the current rules.")
@@ -292,6 +342,7 @@ def show_exceptions(result, ai_status: webapp.AIStatus | None = None, run_key: s
             st.markdown("**Notes from the engine**")
             for note in exc.notes:
                 st.markdown("- " + esc(note))
+        show_investigation(investigations, exc.exception_id, names or {})
         if ai_status is not None:
             show_ai_explanation(result, exc, ai_status, run_key)
 
@@ -381,7 +432,8 @@ else:
     tab_exc, tab_val, tab_dl = st.tabs([
         f"Exceptions ({len(result.exceptions)})", f"Validation issues ({len(result.dataset.issues)})", "Downloads"])
     with tab_exc:
-        show_exceptions(result, ai_status, stored["fingerprint"])
+        # Computed once per run and kept with it; a new run or changed inputs or settings replace them.
+        show_exceptions(result, ai_status, stored["fingerprint"], webapp.cached_investigations(stored), names)
     with tab_val:
         show_validation(result, names)
     with tab_dl:

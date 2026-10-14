@@ -24,6 +24,11 @@ Safety properties:
   (never ``Problem.message``, which can quote the answer); failures carry a
   known error code and a fixed message, never an error's own text. Nothing
   here sends a request unless ``request_ai_explanation`` is called.
+* Investigation checks (``opsresolve.investigation``) are local and deterministic;
+  they are computed once per run (``cached_investigations``) and prepared here
+  as literal text for tables and ``st.text``. A failed check is shown with its
+  fixed label only, and an error while preparing the checks gives a fixed
+  message; error types and messages are never passed to the page.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ import typing
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Callable, Hashable, Mapping, TypeVar
@@ -45,7 +51,7 @@ from typing import Callable, Hashable, Mapping, TypeVar
 import pandas as pd
 from pydantic import ValidationError
 
-from opsresolve import ai
+from opsresolve import ai, investigation
 from opsresolve.config import MatchConfig
 from opsresolve.ingestion import GOODS_RECEIVED, INVOICES, PURCHASE_ORDERS, REQUIRED_COLUMNS, UOM_CONVERSIONS
 from opsresolve.models import ExceptionType, OpsException, Severity
@@ -696,3 +702,100 @@ class AIRequestGuard:
             with self._lock:
                 self._running.discard(key)
                 self._pending.discard(key)
+
+
+# --------------------------------------------------------------------------- #
+# Investigation checks (deterministic, local; display helpers only)
+# --------------------------------------------------------------------------- #
+
+INVESTIGATION_UNAVAILABLE = ("The investigation checks could not be prepared for this run, so none are shown. The "
+                             "findings, amounts and downloads are not affected.")
+INVESTIGATION_NOT_RUN = "The checks for this finding could not be run — nothing concluded."
+INVESTIGATION_NONE = "No investigation checks apply to this type of finding."
+CHECK_FAILED_LABEL = investigation.STATUS_LABELS[investigation.CheckStatus.FAILED]
+
+
+@dataclass(frozen=True)
+class CheckView:
+    """One check as the page may show it. Text is literal (see ``literal_text``): show it with ``st.text`` or in
+    table cells. A failed check carries its fixed label and statement only, never details of the failure."""
+
+    id: str
+    statement: str
+    status: str  # a CheckStatus value
+    label: str  # the fixed status label
+    failed: bool
+    observations: tuple[tuple[str, str], ...] = ()  # (text, cited references such as "R1, R2")
+    missing: tuple[str, ...] = ()
+    how_to_confirm: str = ""
+
+
+@dataclass(frozen=True)
+class RecordView:
+    ref: str
+    file: str
+    line: int
+    reference: str
+
+
+@dataclass(frozen=True)
+class InvestigationView:
+    """The checks of one finding. ``not_run``: the checks could not be prepared (only a fixed message is shown)."""
+
+    exception_id: str
+    checks: tuple[CheckView, ...] = ()
+    records: tuple[RecordView, ...] = ()
+    not_run: bool = False
+
+
+@dataclass(frozen=True)
+class InvestigationRun:
+    """The checks of every finding of one run, computed once. ``message`` is set (fixed text) when they could
+    not be prepared; ``failed_checks`` counts contained failures, for diagnostics (no error details)."""
+
+    fingerprint: str
+    result: InvestigationResult = dataclass_field(repr=False, compare=False)
+    views: Mapping[str, InvestigationView] = dataclass_field(default_factory=dict)
+    message: str | None = None
+    failed_checks: int = 0
+
+
+def investigation_view(found: investigation.Investigation) -> InvestigationView:
+    """The display form of one ``Investigation``. ``failures`` (error class names) are never carried over."""
+    if any(failure.stage == "subject" for failure in found.failures):
+        return InvestigationView(found.exception_id, not_run=True)
+    checks = []
+    for check in found.checks:
+        if check.status is investigation.CheckStatus.FAILED:
+            checks.append(CheckView(check.id, literal_text(check.statement), check.status.value, CHECK_FAILED_LABEL,
+                                    True))
+            continue
+        checks.append(CheckView(
+            check.id, literal_text(check.statement), check.status.value, check.status_label, False,
+            tuple((literal_text(o.text), ", ".join(o.refs)) for o in check.observations),
+            tuple(literal_text(text) for text in check.missing), literal_text(check.how_to_confirm)))
+    records = tuple(RecordView(r.ref, r.source, r.source_row, literal_text(r.reference)) for r in found.related)
+    return InvestigationView(found.exception_id, tuple(checks), records)
+
+
+def investigate_run(result: InvestigationResult, run_fingerprint: str) -> InvestigationRun:
+    """Run the investigation checks for every finding of ``result`` (local and deterministic; no AI, no network).
+    Any error while preparing them gives a fixed message, never the error's text; the result is not changed."""
+    try:
+        found = investigation.investigate_all(result)
+        views = {exception_id: investigation_view(item) for exception_id, item in found.items()}
+    except Exception:  # never show an unexpected error's text; the findings themselves are unaffected
+        return InvestigationRun(run_fingerprint, result, {}, INVESTIGATION_UNAVAILABLE)
+    failed = sum(1 for item in found.values() for f in item.failures)
+    return InvestigationRun(run_fingerprint, result, views, None, failed)
+
+
+def cached_investigations(stored: dict) -> InvestigationRun:
+    """The investigation checks of a stored run (``{"fingerprint", "result"}``), computed on first use and kept in
+    ``stored``. They are recomputed whenever the stored fingerprint or result is not the one they were made from."""
+    run = stored.get("investigations")
+    if not isinstance(run, InvestigationRun) or run.fingerprint != stored["fingerprint"] \
+            or run.result is not stored["result"]:
+        run = investigate_run(stored["result"], stored["fingerprint"])
+        stored["investigations"] = run
+    return run

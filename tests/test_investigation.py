@@ -567,11 +567,13 @@ def imported_modules(path: Path) -> set[str]:
     return names
 
 
-def test_the_investigation_layer_is_pure_and_not_yet_used():
+def test_the_investigation_layer_is_pure_and_used_only_by_the_web_helpers():
     imported = imported_modules(REPO / "src" / "opsresolve" / "investigation.py")
     for forbidden in ("opsresolve.ai", "opsresolve.explanation", "opsresolve.webapp", "opsresolve.reporting",
                       "opsresolve.cli", "anthropic", "streamlit", "pandas", "logging"):
         assert not any(name == forbidden or name.startswith(forbidden + ".") for name in imported), forbidden
     users = [p.name for p in [*(REPO / "src" / "opsresolve").glob("*.py"), REPO / "app.py"]
              if p.name != "investigation.py" and "opsresolve.investigation" in imported_modules(p)]
-    assert users == []  # D1: nothing uses it yet; the web app (D2) and the CLI (D3) come later
+    # D2: only the web helpers use it (app.py goes through them); the CLI (D3) comes later. The AI layer, the
+    # engine and the reports never see it.
+    assert users == ["webapp.py"]

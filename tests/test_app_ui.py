@@ -865,3 +865,186 @@ def test_a_send_not_started_is_dropped_when_another_finding_is_shown(ready):
         next(o for o in at.selectbox(key="detail_id").options if o.startswith(mismatch_id()))).run()
     no_errors(at)
     assert ready.requests == []  # never sent later without a new click
+
+
+# ---- Stage D2: investigation checks in the detail panel --------------------------------------------------------------
+
+import pandas as pd  # noqa: E402
+
+from opsresolve import investigation  # noqa: E402
+
+
+def select(at: AppTest, exception_id: str) -> AppTest:
+    option = next(o for o in at.selectbox(key="detail_id").options if o.startswith(exception_id + " "))
+    return at.selectbox(key="detail_id").set_value(option).run()
+
+
+def investigation_tables(at: AppTest) -> dict[str, pd.DataFrame]:
+    tables = {}
+    for frame in (d.value for d in at.dataframe):
+        columns = tuple(frame.columns)
+        if columns in (("Check", "Candidate explanation", "Status"), ("Observation", "Records"),
+                       ("Needed to decide",), ("Ref", "File", "Line", "Reference")):
+            tables.setdefault(columns[0], pd.DataFrame())
+            tables[columns[0]] = pd.concat([tables[columns[0]], frame], ignore_index=True)
+    return tables
+
+
+def sample_finding_with_checks() -> str:
+    """The sample's first missing goods receipt: receipt not posted is consistent, a GRN elsewhere can't be checked."""
+    result = investigate_files(SAMPLE / "purchase_orders.csv", SAMPLE / "invoices.csv", SAMPLE / "goods_received.csv")
+    return next(e.exception_id for e in result.exceptions if e.exception_type is ExceptionType.MISSING_GOODS_RECEIPT)
+
+
+def test_the_detail_panel_shows_the_checks_with_their_evidence(offline):
+    at = select(run(use_sample(start())), sample_finding_with_checks())
+    no_errors(at)
+    assert "**Investigation checks** (deterministic; candidate explanations, never confirmed causes)" in [
+        m.value for m in at.markdown]
+    tables = investigation_tables(at)
+    assert list(tables["Check"]["Status"]) == ["Consistent with the data — not confirmed", "Can't be checked"]
+    assert list(tables["Check"]["Check"]) == ["H1", "H2"]
+    assert [e.label for e in at.expander if e.label.startswith("H")] == ["H1: details", "H2: details"]
+    assert list(tables["Ref"]["Ref"]) == ["R1", "R2"]
+    assert set(tables["Ref"]["File"]) == {"data/sample/purchase_orders.csv", "data/sample/invoices.csv"}
+    assert any("not confirmed" in t.value for t in at.text)
+    assert not at.warning or all(webapp.CHECK_FAILED_LABEL not in w.value for w in at.warning)
+
+
+def test_findings_outside_the_catalogue_say_so(offline):
+    result = investigate_files(SAMPLE / "purchase_orders.csv", SAMPLE / "invoices.csv", SAMPLE / "goods_received.csv")
+    duplicate = next(e.exception_id for e in result.exceptions
+                     if e.exception_type is ExceptionType.POSSIBLE_DUPLICATE_INVOICE)
+    at = select(run(use_sample(start())), duplicate)
+    assert webapp.escape_markdown(webapp.INVESTIGATION_NONE) in [c.value for c in at.caption]
+    assert "Check" not in investigation_tables(at)
+
+
+def test_investigations_are_computed_once_per_run_and_after_every_change(offline, monkeypatch):
+    calls = []
+    real = webapp.investigate_run
+    monkeypatch.setattr(webapp, "investigate_run", lambda result, fp: calls.append(fp) or real(result, fp))
+    at = run(use_sample(start()))
+    assert len(calls) == 1
+    at = select(at, sample_finding_with_checks())
+    at = at.multiselect(key="filter_severity").set_value(["HIGH"]).run()
+    at = at.multiselect(key="filter_severity").set_value([]).run()
+    assert len(calls) == 1  # browsing findings and filters reuses the run's results
+    at = at.number_input(key="cfg_quantity_tolerance").set_value(5.0).run()
+    assert not at.tabs and "investigations" not in at.session_state.get("last_run", {})
+    at = run(at)
+    assert len(calls) == 2 and calls[1] != calls[0]  # new settings: a new fingerprint, computed again
+    at = run(at)
+    assert len(calls) == 3  # a new run with the same inputs is never served the previous run's checks
+    assert at.session_state["last_run"]["investigations"].result is at.session_state["last_run"]["result"]
+
+
+def test_a_failed_check_shows_only_its_fixed_label(offline, monkeypatch):
+    def broken(subject, index):
+        raise RuntimeError("secret internal detail RVX-00981")
+
+    monkeypatch.setitem(investigation._CHECKS, "document_under_other_po", broken)
+    at = select(run(use_sample(start())), sample_finding_with_checks())
+    no_errors(at)
+    assert "H2: Check failed — nothing concluded" in [w.value.replace("\\", "") for w in at.warning]
+    tables = investigation_tables(at)
+    assert list(tables["Check"]["Status"]) == ["Consistent with the data — not confirmed"]  # evidence only
+    assert [e.label for e in at.expander if e.label.startswith("H")] == ["H1: details"]
+    shown = everything_shown(at)
+    assert "RuntimeError" not in shown and "secret internal detail" not in shown
+    assert investigation.CHECK_FAILED not in shown and "Traceback" not in shown
+    assert metrics(at)["Exceptions"] == "18"
+
+
+def test_a_failure_before_the_checks_shows_a_fixed_message(offline, monkeypatch):
+    monkeypatch.setattr(investigation, "_subject", lambda exception, index: (_ for _ in ()).throw(KeyError("x")))
+    at = select(run(use_sample(start())), sample_finding_with_checks())
+    no_errors(at)
+    assert webapp.escape_markdown(webapp.INVESTIGATION_NOT_RUN) in [w.value for w in at.warning]
+    assert "KeyError" not in everything_shown(at)
+
+
+def test_an_indexing_failure_is_contained_to_the_section(offline, monkeypatch):
+    def broken(self, result):
+        raise ValueError("secret internal detail")
+
+    monkeypatch.setattr(investigation._Index, "__init__", broken)
+    at = select(run(use_sample(start())), sample_finding_with_checks())
+    no_errors(at)
+    assert webapp.escape_markdown(webapp.INVESTIGATION_UNAVAILABLE) in [i.value for i in at.info]
+    assert metrics(at)["Exceptions"] == "18" and len(at.selectbox(key="detail_id").options) == 18
+    assert {d.key for d in at.download_button} >= {"dl_exceptions", "dl_validation", "dl_report"}
+    shown = everything_shown(at)
+    assert "secret" not in shown and "ValueError" not in shown
+
+
+def test_hostile_text_in_the_checks_is_shown_only_as_literal_text(offline):
+    hostile = "![x](http://tracker.invalid/p.png) **bold** <b>html</b>"
+    po = PO_CSV + "P2,1,S1,Supplier One,SKU-2,10,5.00,USD,2026-08-01\n"
+    inv = INV_CSV + "I2,2026-08-10,S1,P2,SKU-2,10,5.00,USD\n"
+    grn = GRN_CSV + f'"{hostile}",2026-08-08,S1,"{hostile}",SKU-2,10\n'
+    at = run(upload(start(), po=po, inv=inv, grn=grn))
+    no_errors(at)
+    for option in at.selectbox(key="detail_id").options:
+        at = at.selectbox(key="detail_id").set_value(option).run()
+        for value in (m.value for group in (at.markdown, at.caption, at.info, at.warning, at.error, at.success)
+                      for m in group):
+            assert "](http" not in value and "<b>html" not in value, (option, value)
+        assert not any(m.proto.allow_html and "tracker" in m.value for m in at.markdown)
+        assert [e.label for e in at.expander if "tracker" in e.label] == []
+    missing_receipt = next(o for o in at.selectbox(key="detail_id").options if "MISSING_GOODS_RECEIPT" in o)
+    at = at.selectbox(key="detail_id").set_value(missing_receipt).run()
+    tables = investigation_tables(at)
+    assert any(hostile in text for text in tables["Observation"]["Observation"])  # displayed as written, in a cell
+    assert hostile in set(tables["Ref"]["Reference"])
+
+
+def test_upload_names_in_the_cited_records_are_shown_without_invisible_characters(offline):
+    po = PO_CSV + "P2,1,S1,Supplier One,SKU-2,10,5.00,USD,2026-08-01\n"
+    inv = INV_CSV + "I2,2026-08-10,S1,P2,SKU-2,10,5.00,USD\n"
+    name = "inv\u202eoices\rcopy.csv"  # a right-to-left override and a carriage return in the upload name
+    at = run(upload(start(), po=po, inv=inv, names={"invoices": name}))
+    no_errors(at)
+    missing_receipt = next(o for o in at.selectbox(key="detail_id").options if "MISSING_GOODS_RECEIPT" in o)
+    at = at.selectbox(key="detail_id").set_value(missing_receipt).run()
+    files = set(investigation_tables(at)["Ref"]["File"])
+    assert "inv oices copy.csv" in files and not any("\u202e" in f or "\r" in f for f in files)
+
+def test_viewing_the_checks_changes_no_finding_or_download(offline):
+    at = run(use_sample(start()))
+    result = at.session_state["last_run"]["result"]
+    fresh = investigate_files(SAMPLE / "purchase_orders.csv", SAMPLE / "invoices.csv", SAMPLE / "goods_received.csv")
+
+    def downloads(r):
+        return webapp.exceptions_csv(r), webapp.validation_csv(r), webapp.summary_markdown(r)
+
+    before = downloads(result)  # this run's three downloads, before any finding's checks are shown
+    for option in at.selectbox(key="detail_id").options:  # every finding's checks rendered
+        at = at.selectbox(key="detail_id").set_value(option).run()
+        no_errors(at)
+    assert at.session_state["last_run"]["result"] is result and downloads(result) == before
+    # The findings and the CSV downloads also match a fresh engine run (its report has another timestamp).
+    assert [e.model_dump() for e in result.exceptions] == [e.model_dump() for e in fresh.exceptions]
+    assert downloads(result)[:2] == downloads(fresh)[:2]
+    assert [d.key for d in at.download_button][-3:] == ["dl_exceptions", "dl_validation", "dl_report"]
+    assert metrics(at) == {"Rows read": "62", "Validation issues": "3", "Exceptions": "18",
+                           "High severity": "8", "Medium severity": "7", "Low severity": "3"}
+
+
+def test_checks_work_without_the_ai_sdk_or_a_key_and_with_ai_off(offline, monkeypatch):
+    monkeypatch.setattr(ai, "sdk_available", lambda: False)
+    monkeypatch.setattr(ai, "explain_exception", lambda *a, **k: pytest.fail("AI used"))
+    at = select(run(use_sample(start())), sample_finding_with_checks())
+    no_errors(at)
+    assert at.toggle(key="ai_enabled").value is False and ai_buttons(at) == []
+    assert "Check" in investigation_tables(at)
+    at = at.toggle(key="ai_enabled").set_value(True).run()  # AI on but not ready: checks unaffected
+    no_errors(at)
+    assert webapp.escape_markdown(webapp.AI_STATUS_MESSAGES["sdk_missing"]) in [w.value for w in at.warning]
+    assert ai_buttons(at) == [] and "Check" in investigation_tables(at)
+
+
+def test_the_app_reaches_the_checks_only_through_the_web_helpers():
+    source = (REPO / "app.py").read_text(encoding="utf-8")
+    assert "opsresolve.investigation" not in source and "import investigation" not in source
+    assert source.count("unsafe_allow_html=True") == 2

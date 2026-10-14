@@ -1197,3 +1197,136 @@ def test_findings_are_independent_and_waiting_sends_for_other_findings_are_dropp
     assert guard.run(second, lambda: "independent") == "independent"
     release.set()
     worker.join(5)
+
+
+# ---- investigation checks (Stage D2): display helpers ---------------------------------------------------------------
+
+import socket  # noqa: E402
+
+from opsresolve import ai, investigation  # noqa: E402
+
+INVESTIGATION_FIXTURES = REPO / "tests" / "fixtures" / "investigations"
+
+
+def investigation_fixture_result():
+    folder = INVESTIGATION_FIXTURES
+    return investigate_files(folder / "purchase_orders.csv", folder / "invoices.csv", folder / "goods_received.csv",
+                             uom_conversions_path=folder / "uom_conversions.csv")
+
+
+def downloads_of(result):
+    return ([e.model_dump() for e in result.exceptions], exceptions_csv(result), validation_csv(result),
+            summary_markdown(result))
+
+
+def test_the_run_view_carries_every_finding_and_matches_the_investigation_layer():
+    result = investigation_fixture_result()
+    run = webapp.investigate_run(result, "fp")
+    assert (run.message, run.failed_checks, run.fingerprint) == (None, 0, "fp")
+    assert list(run.views) == [e.exception_id for e in result.exceptions]
+    found = investigation.investigate_all(result, strict=True)
+    for exception_id, view in run.views.items():
+        assert [(c.id, c.status, c.label, c.failed) for c in view.checks] == [
+            (c.id, c.status.value, c.status_label, False) for c in found[exception_id].checks]
+        assert [(r.ref, r.file, r.line, r.reference) for r in view.records] == [
+            (r.ref, r.source, r.source_row, r.reference) for r in found[exception_id].related]
+    labels = {c.label for view in run.views.values() for c in view.checks}
+    assert labels == {"Consistent with the data — not confirmed", "Contradicted by the data", "Can't be checked"}
+    assert webapp.CHECK_FAILED_LABEL not in labels
+
+
+def test_investigating_changes_no_finding_amount_or_download():
+    result = investigation_fixture_result()
+    before = downloads_of(result)
+    webapp.investigate_run(result, "fp")
+    assert downloads_of(result) == before
+
+
+def test_a_failed_check_shows_its_fixed_label_only(monkeypatch):
+    def broken(subject, index):
+        raise RuntimeError("secret internal detail SUP-A01")
+
+    monkeypatch.setitem(investigation._CHECKS, "unit_mix_up", broken)
+    run = webapp.investigate_run(investigation_fixture_result(), "fp")
+    failed = [c for view in run.views.values() for c in view.checks if c.failed]
+    assert failed and run.failed_checks == len(failed)
+    for check in failed:
+        assert (check.status, check.label, check.observations, check.missing, check.how_to_confirm) == (
+            "failed", "Check failed — nothing concluded", (), (), "")
+        assert check.statement == investigation.UNIT_MIX_UP.statement
+    shown = repr(run.views)
+    assert "RuntimeError" not in shown and "secret" not in shown and investigation.CHECK_FAILED not in shown
+    other = [c for view in run.views.values() for c in view.checks if not c.failed]
+    assert other and all(c.status != "failed" for c in other)  # the other checks still ran
+
+
+def test_a_failure_before_the_checks_marks_only_that_finding(monkeypatch):
+    real = investigation._subject
+
+    def broken(exception, index):
+        if exception.po_number == "P-1003":
+            raise KeyError("secret")
+        return real(exception, index)
+
+    monkeypatch.setattr(investigation, "_subject", broken)
+    run = webapp.investigate_run(investigation_fixture_result(), "fp")
+    not_run = [view for view in run.views.values() if view.not_run]
+    assert len(not_run) == 2 and all(v.checks == () and v.records == () for v in not_run)  # P-1003 has two findings
+    assert run.message is None and "KeyError" not in repr(run.views)
+
+
+def test_an_indexing_failure_gives_a_fixed_message_and_no_views(monkeypatch):
+    def broken(self, result):
+        raise ValueError("secret internal detail")
+
+    monkeypatch.setattr(investigation._Index, "__init__", broken)
+    result = investigation_fixture_result()
+    before = downloads_of(result)
+    run = webapp.investigate_run(result, "fp")
+    assert (run.message, dict(run.views), run.failed_checks) == (webapp.INVESTIGATION_UNAVAILABLE, {}, 0)
+    assert "secret" not in repr(run) and "ValueError" not in repr(run)
+    assert downloads_of(result) == before
+
+
+def test_hostile_text_is_made_literal_but_never_rewritten_otherwise():
+    hostile = "![x](http://tracker.invalid/p.png) **bold** <b>html</b>‮\rtail"
+    po = PO_CSV + "P2,1,S1,Supplier One,SKU-2,10,5.00,USD,2026-08-01\n"
+    inv = INV_CSV + "I2,2026-08-10,S1,P2,SKU-2,10,5.00,USD\n"
+    grn = GRN_CSV + f'"{hostile}",2026-08-08,S1,"{hostile}",SKU-2,10\n'  # an unmatched receipt for P2's quantity
+    result = run_reconciliation(uploads(po=po, inv=inv, grn=grn), MatchConfig())
+    run = webapp.investigate_run(result, "fp")
+    texts = [t for v in run.views.values() for c in v.checks for t, _ in c.observations]
+    texts += [r.reference for v in run.views.values() for r in v.records]
+    assert any("tracker.invalid" in t and "<b>html</b>" in t for t in texts)  # shown as written, in table cells
+    assert not any("‮" in t or "\r" in t for t in texts)  # invisible reordering and carriage returns removed
+
+
+def test_results_are_computed_once_per_run_and_replaced_when_the_run_changes(monkeypatch):
+    calls = []
+    real = investigation.investigate_all
+    monkeypatch.setattr(investigation, "investigate_all", lambda result, **kw: calls.append(result) or real(result))
+    first = investigation_fixture_result()
+    stored = {"fingerprint": "fp-1", "result": first}
+    run = webapp.cached_investigations(stored)
+    assert webapp.cached_investigations(stored) is run and stored["investigations"] is run and len(calls) == 1
+    stored["fingerprint"] = "fp-2"  # inputs or settings changed
+    assert webapp.cached_investigations(stored) is not run and len(calls) == 2
+    second = investigation_fixture_result()  # a new run with the same inputs
+    stored["result"] = second
+    assert webapp.cached_investigations(stored).result is second and len(calls) == 3
+    assert webapp.cached_investigations(stored).result is second and len(calls) == 3
+    assert calls == [first, first, second]
+
+
+def test_investigations_need_no_ai_sdk_key_or_network(monkeypatch):
+    def blocked(*args, **kwargs):
+        raise AssertionError("a test tried to open a network connection")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.delenv(ai.API_KEY_VARIABLE, raising=False)
+    monkeypatch.setattr(ai, "sdk_available", lambda: False)
+    monkeypatch.setattr(ai, "explain_exception", lambda *a, **k: pytest.fail("AI used for investigations"))
+    monkeypatch.setattr(ai, "_import_sdk", lambda: pytest.fail("SDK imported for investigations"))
+    run = webapp.investigate_run(investigation_fixture_result(), "fp")
+    assert run.message is None and run.failed_checks == 0 and run.views
