@@ -331,3 +331,122 @@ def test_cli_without_a_profile_prints_no_provenance(tmp_path, capsys, sample_dir
     assert out.splitlines()[0].startswith("purchase_orders  rows=")
     assert "Import profile" not in out
     assert "Import profile" not in (tmp_path / "exception_report.md").read_text(encoding="utf-8")
+
+
+# ---- --profile with per-file paths (milestone 7, acceptance gap G2) ----------------------------------
+# cli.main takes each file from its own option when given, otherwise from --data-dir (default data/sample);
+# the conversion file is --uom-conversions, otherwise <data-dir>/uom_conversions.csv only if it exists.
+# Tests switch into tmp_path so the default data/sample can never be picked up by accident.
+# Amounts are derived by hand from the ERP fixture (see tests/test_ingestion_profiles.py).
+
+def copy_as(source: Path, folder: Path, name: str, replace: tuple[bytes, bytes] | None = None) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    data = source.read_bytes()
+    if replace is not None:
+        assert data.count(replace[0]) == 1, replace
+        data = data.replace(*replace)
+    (folder / name).write_bytes(data)
+    return folder / name
+
+
+def per_file_args(folder: Path, source_dir: Path = ERP_DIR, with_uom: bool = True) -> list:
+    """Copies of the fixture files under non-canonical names, passed with the per-file options."""
+    args = ["--purchase-orders", copy_as(source_dir / "purchase_orders.csv", folder, "orders export.csv"),
+            "--invoices", copy_as(source_dir / "invoices.csv", folder, "invoice-list.tsv"),
+            "--goods-received", copy_as(source_dir / "goods_received.csv", folder, "receipts.txt")]
+    if with_uom:
+        args += ["--uom-conversions", copy_as(source_dir / "uom_conversions.csv", folder, "units.csv")]
+    return args
+
+
+def exception_amounts(out_dir: Path) -> dict:
+    with (out_dir / "exceptions.csv").open(encoding="utf-8") as handle:
+        return {(r["exception_type"], r["sku"]): r["amount_impact"] for r in csv.DictReader(handle)}
+
+
+ERP_PROVENANCE = f"Import profile: {ERP_NAME} (sha256 {short_hash(ERP_PROFILE.read_bytes())})"
+
+
+def test_profile_with_per_file_paths_reads_every_named_file(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out_dir = tmp_path / "out"
+    code, out, err = run_cli(capsys, *per_file_args(tmp_path / "exports"), "--profile", ERP_PROFILE,
+                             "--output-dir", out_dir)
+    assert code == 0 and err == ""
+    assert out.splitlines()[:5] == [
+        ERP_PROVENANCE,
+        "purchase_orders  rows=2    accepted=2    rejected=0",
+        "invoices         rows=2    accepted=2    rejected=0",
+        "goods_received   rows=2    accepted=2    rejected=0",
+        "uom_conversions  rows=1    accepted=1    rejected=0",
+    ]
+    assert "validation issues: 0" in out.splitlines() and "exceptions: 2" in out.splitlines()
+    # (12.75 - 12.50) x 1200; (10 - 8) x 1234.56; 100 BOX x 12 = 1200 EA received, so no A-100 quantity gap.
+    assert exception_amounts(out_dir) == {("PRICE_MISMATCH", "A-100"): "300.00",
+                                          ("QUANTITY_MISMATCH", "B-200"): "2469.12"}
+    markdown = (out_dir / "exception_report.md").read_text(encoding="utf-8")
+    assert "Import profile: Fictional ERP export \\(test fixture\\) (sha256 " in markdown
+
+
+def test_per_file_paths_without_uom_option_read_no_conversion_file(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no data/sample here, so nothing can be found automatically
+    out_dir = tmp_path / "out"
+    code, out, _ = run_cli(capsys, *per_file_args(tmp_path / "exports", with_uom=False), "--profile", ERP_PROFILE,
+                           "--output-dir", out_dir)
+    assert code == 0
+    assert not any(line.startswith("uom_conversions") for line in out.splitlines())
+    # Without a BOX -> EA conversion, A-100 cannot be compared (0.00); B-200 is unaffected.
+    assert exception_amounts(out_dir) == {("UNIT_OF_MEASURE_MISMATCH", "A-100"): "0.00",
+                                          ("QUANTITY_MISMATCH", "B-200"): "2469.12"}
+
+
+def test_a_per_file_option_overrides_only_its_own_file_from_data_dir(tmp_path, capsys):
+    # Same format as the fixture invoices (tab, UTF-8 with byte-order mark), with INV-501 at 13.00.
+    invoices = copy_as(ERP_DIR / "invoices.csv", tmp_path / "override", "invoices.csv",
+                       replace=(b"\t12.75\t", b"\t13.00\t"))
+    out_dir = tmp_path / "out"
+    code, out, _ = run_cli(capsys, "--data-dir", ERP_DIR, "--invoices", invoices, "--profile", ERP_PROFILE,
+                           "--output-dir", out_dir)
+    assert code == 0
+    # The conversion file still comes from --data-dir.
+    assert "uom_conversions  rows=1    accepted=1    rejected=0" in out.splitlines()
+    # (13.00 - 12.50) x 1200 = 600.00 proves the override was read; the rest is the data-dir export.
+    assert exception_amounts(out_dir) == {("PRICE_MISMATCH", "A-100"): "600.00",
+                                          ("QUANTITY_MISMATCH", "B-200"): "2469.12"}
+
+
+def test_uom_conversions_option_overrides_the_data_dir_conversion_file(tmp_path, capsys):
+    # Same format as the fixture conversion file (';', cp1252, mapped headers), but 10 per BOX instead of 12.
+    units = copy_as(ERP_DIR / "uom_conversions.csv", tmp_path / "override", "units.csv",
+                    replace=(b"A-100;BOX;EA;12", b"A-100;BOX;EA;10"))
+    out_dir = tmp_path / "out"
+    code, _, _ = run_cli(capsys, "--data-dir", ERP_DIR, "--uom-conversions", units, "--profile", ERP_PROFILE,
+                         "--output-dir", out_dir)
+    assert code == 0
+    # 100 BOX x 10 = 1000 EA received against 1200 invoiced: 200 x 12.50 = 2500.00 (PO price).
+    assert exception_amounts(out_dir) == {("QUANTITY_MISMATCH", "A-100"): "2500.00",
+                                          ("PRICE_MISMATCH", "A-100"): "300.00",
+                                          ("QUANTITY_MISMATCH", "B-200"): "2469.12"}
+
+
+def test_invalid_profile_with_per_file_paths_exits_2_and_writes_nothing(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    bad = write_profile(tmp_path, {"profile_version": 1, "name": "x", "defaults": {"delimiter": ":"}})
+    out_dir = tmp_path / "out"
+    code, out, err = run_cli(capsys, *per_file_args(tmp_path / "exports"), "--profile", bad, "--output-dir", out_dir)
+    assert (code, out) == (2, "")
+    assert err.startswith(f"{bad}: Invalid import profile:\n  - defaults.delimiter: ':' is not supported")
+    assert not out_dir.exists()
+
+
+def test_per_file_paths_without_a_profile_print_no_profile_line(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with_profile, without = tmp_path / "with", tmp_path / "without"
+    run_cli(capsys, *per_file_args(tmp_path / "erp"), "--profile", ERP_PROFILE, "--output-dir", with_profile)
+    code, out, _ = run_cli(capsys, *per_file_args(tmp_path / "canonical", FIXTURES / "canonical"),
+                           "--output-dir", without)
+    assert code == 0
+    assert "Import profile" not in out
+    assert "Import profile" not in (without / "exception_report.md").read_text(encoding="utf-8")
+    # The same data in the built-in format gives byte-identical exception rows.
+    assert (without / "exceptions.csv").read_bytes() == (with_profile / "exceptions.csv").read_bytes()
