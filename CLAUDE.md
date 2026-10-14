@@ -46,7 +46,7 @@ src/opsresolve/
   detection.py   Exception rules, amounts, severity, recommended actions     (pure)
   pipeline.py    Orchestration: ingestion -> matching -> uom -> detection
   reporting.py   Markdown / CSV / console rendering                         (no rules)
-  webapp.py      Helpers for app.py: temp-file runs, summaries, safe downloads (no rules, no Streamlit)
+  webapp.py      Helpers for app.py: temp-file runs, summaries, safe downloads, optional AI explanation helpers (no rules, no Streamlit)
   evaluation.py  Scores the pipeline against data/evaluation's answer key    (P/R/F1)
   explanation.py Evidence packs, the AI answer contract and its deterministic validator (pure; no LLM)
   ai.py          Optional Anthropic provider: config, request, pseudonymisation, explain_exception
@@ -98,8 +98,13 @@ python -m streamlit run app.py   # local web app on http://localhost:8501
   `docs/examples/import-profile-example.json` valid (tested in `tests/test_app_ui.py`, which needs the `app`
   extra; CI installs it). The evaluation command has no profile option. Use `--profile` in full on the command
   line (`--p` is ambiguous between `--profile` and `--purchase-orders`; `--pr` resolves to `--profile`).
-- AI explanations: only `ai.py` imports `anthropic` (lazily); the engine, CLI, reports and app must not import
-  `opsresolve.ai`. The model never calculates or changes an amount or exception; every answer passes
+- AI explanations: only `ai.py` imports `anthropic` (lazily). Among application modules only `webapp.py` may import
+  `opsresolve.ai`; it prepares readiness, request previews and display results. The engine, CLI, reports, evaluation
+  and `app.py` must not. Model-written text is shown as literal text (`st.text` or table cells), never through
+  `st.markdown` or `unsafe_allow_html`; the request preview is shown with `st.code`. Rejected answers show problem
+  codes and allow-listed field locations only, never `Problem.message`; failures show fixed messages, never an
+  error's own text, the provider's request id or the key. The model never calculates or changes an amount or
+  exception; every answer passes
   `explanation.validate_explanation` before it is returned, and possible causes are unverified hypotheses.
   The key comes only from `ANTHROPIC_API_KEY`. Never log the key, prompts, evidence, supplier names or
   answers. Keep `ai.TRANSMITTED_FIELDS` and the `ai.py` docstring in step with what is sent. Tests never call

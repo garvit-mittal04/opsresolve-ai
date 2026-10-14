@@ -15,6 +15,15 @@ Safety properties:
   CLI's report files are not affected.
 * An uploaded import profile is parsed from memory and never written to disk.
   Its name comes from the user, so it is shown escaped (see ``profile_caption``).
+* Optional AI explanations (``opsresolve.ai``) are prepared here for display.
+  Text the model wrote is returned as literal text (carriage returns and
+  invisible format characters replaced by spaces), not as Markdown: the page
+  must show it with ``st.text`` or in table cells, never with ``st.markdown`` or
+  ``unsafe_allow_html``, and must show the request preview with ``st.code``.
+  Rejected answers expose problem codes and allow-listed field locations only
+  (never ``Problem.message``, which can quote the answer); failures carry a
+  known error code and a fixed message, never an error's own text. Nothing
+  here sends a request unless ``request_ai_explanation`` is called.
 """
 
 from __future__ import annotations
@@ -23,6 +32,8 @@ import hashlib
 import io
 import re
 import tempfile
+import typing
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
@@ -30,7 +41,9 @@ from pathlib import Path
 from typing import Mapping
 
 import pandas as pd
+from pydantic import ValidationError
 
+from opsresolve import ai
 from opsresolve.config import MatchConfig
 from opsresolve.ingestion import GOODS_RECEIVED, INVOICES, PURCHASE_ORDERS, REQUIRED_COLUMNS, UOM_CONVERSIONS
 from opsresolve.models import ExceptionType, OpsException, Severity
@@ -418,3 +431,194 @@ def escape_markdown(text: str | None) -> str:
     if not text:
         return ""
     return _MARKDOWN_SPECIAL.sub(r"\\\1", text).replace("\n", " ")
+
+
+# --------------------------------------------------------------------------- #
+# Optional AI explanations (helpers only; the page does not use them yet)
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class AIStatus:
+    """Whether an explanation can be requested. ``message`` is fixed text; ``config`` is set only when ready."""
+
+    ready: bool
+    code: str  # "ready", "sdk_missing", "key_missing" or "invalid_settings"
+    message: str
+    config: ai.AIConfig | None = None
+
+
+AI_STATUS_MESSAGES = {
+    "ready": "AI explanations are available. A request is sent only when you ask for one.",
+    "sdk_missing": "AI explanations need the optional Anthropic SDK (this project's ai extra).",
+    "key_missing": "AI explanations need the ANTHROPIC_API_KEY environment variable; set it and restart the app.",
+}
+
+# Fixed text for every error code of opsresolve.ai; an error's own message is never shown.
+AI_ERROR_MESSAGES = {
+    "not_configured": "AI explanations are not configured (Anthropic SDK, ANTHROPIC_API_KEY or OPSRESOLVE_AI_* "
+                      "settings). Nothing was sent.",
+    "privacy_guard": "Supplier details could not be removed from the evidence safely, so nothing was sent.",
+    "authentication": "The API key was rejected or lacks permission.",
+    "rate_limited": "The API rate limit was reached. Try again later.",
+    "timeout": "The request timed out. No explanation is shown.",
+    "connection": "The API could not be reached. No explanation is shown.",
+    "provider_error": "The AI service returned an error. No explanation is shown.",
+    "refused": "The model declined to explain this exception.",
+    "malformed": "The AI answer was incomplete or unreadable, so it is not shown.",
+}
+AI_UNEXPECTED_MESSAGE = "The AI explanation could not be prepared because of an unexpected error. Nothing is shown."
+AI_ACCEPTED_LABEL = ("AI-generated explanation (advisory). It was checked against this exception's evidence, which "
+                     "does not make it true: review it against the source documents before acting. The figures and "
+                     "decisions above are the engine's and are unchanged.")
+AI_REJECTED_MESSAGE = "The AI answer did not pass the checks against the evidence, so it is not shown."
+AI_SUFFICIENCY = {"sufficient": "The model judged the evidence sufficient.",
+                  "partial": "The model judged the evidence partial.",
+                  "insufficient": "The model judged the evidence insufficient."}
+
+
+def ai_status(environ: Mapping[str, str] | None = None) -> AIStatus:
+    """Readiness for AI explanations, without importing the SDK or sending anything. Never shows the key."""
+    if not ai.sdk_available():
+        return AIStatus(False, "sdk_missing", AI_STATUS_MESSAGES["sdk_missing"])
+    if not ai.api_key_configured(environ):
+        return AIStatus(False, "key_missing", AI_STATUS_MESSAGES["key_missing"])
+    try:
+        config = ai.AIConfig.from_env(environ)
+    except ValidationError as exc:  # the count only: a value could be sensitive
+        return AIStatus(False, "invalid_settings",
+                        f"The OPSRESOLVE_AI_* settings are invalid ({exc.error_count()} problem(s)); fix them and "
+                        f"restart the app.")
+    return AIStatus(True, "ready", AI_STATUS_MESSAGES["ready"], config)
+
+
+@dataclass(frozen=True)
+class AIPreview:
+    """The exact request body (JSON) that would be sent, or a fixed message. Show ``body`` as literal code text."""
+
+    body: str | None
+    error_code: str | None = None
+    message: str | None = None
+
+
+def _error_code(code: str | None) -> str:
+    """A known error code (one with a fixed message), or "unexpected"; any other value is never passed on."""
+    return code if isinstance(code, str) and code in AI_ERROR_MESSAGES else "unexpected"
+
+
+def preview_ai_request(result: InvestigationResult, exception: OpsException, config: ai.AIConfig) -> AIPreview:
+    """What ``request_ai_explanation`` would send for this exception. Sends nothing."""
+    try:
+        return AIPreview(ai.preview_request(result, exception, config))
+    except ai.ExplanationError as exc:
+        code = _error_code(exc.code)
+        return AIPreview(None, code, AI_ERROR_MESSAGES.get(code, AI_UNEXPECTED_MESSAGE))
+    except Exception:  # never show an unexpected error's text
+        return AIPreview(None, "unexpected", AI_UNEXPECTED_MESSAGE)
+
+
+def literal_text(text: str) -> str:
+    """Model-written text made safe to show literally: carriage returns and invisible format characters
+    (Unicode category Cf, e.g. bidi controls that reorder what is displayed) become spaces. It is not escaped:
+    the page shows it with ``st.text`` or in a table cell, where nothing is interpreted as Markdown or HTML."""
+    return "".join(" " if ch == "\r" or unicodedata.category(ch) == "Cf" else ch for ch in text)
+
+
+@dataclass(frozen=True)
+class AIItem:
+    """One line of an accepted explanation (literal text) with the evidence references it cites."""
+
+    text: str
+    refs: tuple[str, ...] = ()
+    check: str = ""  # how to check a possible cause (literal text)
+
+
+@dataclass(frozen=True)
+class AIExplanationView:
+    """What the page may show for one request. Model-written strings are literal text (see ``literal_text``):
+    show them with ``st.text`` or in table cells, never with ``st.markdown`` or ``unsafe_allow_html``.
+
+    ``status`` is "accepted", "rejected", "unavailable" or "error". Only "accepted" carries content; "rejected"
+    carries (code, location) pairs with allow-listed locations; the others carry a known ``error_code`` and a
+    fixed ``message``.
+    """
+
+    status: str
+    message: str
+    explanation: str = ""
+    confirmed_facts: tuple[AIItem, ...] = ()
+    possible_causes: tuple[AIItem, ...] = ()
+    investigation_steps: tuple[AIItem, ...] = ()
+    sufficiency: str = ""
+    missing_information: tuple[str, ...] = ()
+    problems: tuple[tuple[str, str], ...] = ()
+    error_code: str | None = None
+
+
+def _refs(refs) -> tuple[str, ...]:
+    return tuple(literal_text(ref) for ref in refs)  # already checked to be E1, E2, ...
+
+
+def _schema_paths(model, prefix: str = "") -> set[str]:
+    """Every field path of the answer contract, with "[]" where a list index goes (derived from the model)."""
+    paths = set()
+    for name, field in model.model_fields.items():
+        path = f"{prefix}.{name}" if prefix else name
+        paths.add(path)
+        if typing.get_origin(field.annotation) is tuple:  # a list in the answer: items are path[i]
+            paths.add(f"{path}[]")
+            item = typing.get_args(field.annotation)[0]
+            if isinstance(item, type) and hasattr(item, "model_fields"):
+                paths |= _schema_paths(item, f"{path}[]")
+    return paths
+
+
+# A validator location is a field path such as "confirmed_facts[0].evidence_refs[1]". A schema error can name a
+# field the model invented, so only paths of the answer contract (and "(root)") are shown; anything else is
+# shown as a placeholder, never as written.
+_ALLOWED_LOCATIONS = frozenset(_schema_paths(ai.ExplanationOutput)) | {"(root)"}
+_PATH_SYNTAX = re.compile(r"[a-z_]+(\[\d{1,3}\])?(\.[a-z_]+(\[\d{1,3}\])?)*")
+UNEXPECTED_LOCATION = "(unexpected field)"
+
+
+def _location(location: str) -> str:
+    if location == "(root)":
+        return location
+    if not isinstance(location, str) or not _PATH_SYNTAX.fullmatch(location):
+        return UNEXPECTED_LOCATION
+    return location if re.sub(r"\[\d+\]", "[]", location) in _ALLOWED_LOCATIONS else UNEXPECTED_LOCATION
+
+
+def explanation_view(outcome: ai.ExplanationResult) -> AIExplanationView:
+    """The display form of an ``ExplanationResult``: literal content, codes and fixed messages only."""
+    if outcome.status == "accepted" and outcome.explanation is not None:
+        answer = outcome.explanation
+        return AIExplanationView(
+            "accepted", AI_ACCEPTED_LABEL, explanation=literal_text(answer.explanation),
+            confirmed_facts=tuple(AIItem(literal_text(f.statement), _refs(f.evidence_refs))
+                                  for f in answer.confirmed_facts),
+            possible_causes=tuple(AIItem(literal_text(c.hypothesis), _refs(c.supporting_refs),
+                                         literal_text(c.how_to_check)) for c in answer.possible_causes),
+            investigation_steps=tuple(AIItem(literal_text(s.step), _refs(s.evidence_refs))
+                                      for s in answer.investigation_steps),
+            sufficiency=AI_SUFFICIENCY.get(answer.sufficiency, ""),
+            missing_information=tuple(literal_text(item) for item in answer.missing_information))
+    if outcome.status == "rejected":  # Problem.message can quote the answer: codes and locations only
+        return AIExplanationView("rejected", AI_REJECTED_MESSAGE, problems=tuple(
+            (literal_text(p.code), _location(p.location)) for p in outcome.problems))
+    status = "unavailable" if outcome.status == "not_configured" else "error"
+    code = _error_code(outcome.error_code)
+    return AIExplanationView(status, AI_ERROR_MESSAGES.get(code, AI_UNEXPECTED_MESSAGE), error_code=code)
+
+
+def request_ai_explanation(result: InvestigationResult, exception: OpsException, config: ai.AIConfig, *,
+                           provider: ai.ExplanationProvider | None = None,
+                           environ: Mapping[str, str] | None = None) -> AIExplanationView:
+    """Ask for an explanation of one exception and return what may be shown. Sends one request.
+
+    ``provider`` defaults to the Anthropic provider (tests pass a fake). The engine's result is not changed.
+    """
+    try:
+        outcome = ai.explain_exception(result, exception, provider, config=config, environ=environ)
+    except Exception:  # never show an unexpected error's text
+        return AIExplanationView("error", AI_UNEXPECTED_MESSAGE, error_code="unexpected")
+    return explanation_view(outcome)
