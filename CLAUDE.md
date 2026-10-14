@@ -9,9 +9,11 @@ businesses: discrepancies between purchase orders (PO), supplier invoices and go
 notes (GRN). It finds the discrepancy, quantifies it, lists the evidence and recommends a
 corrective action.
 
-Current state: **Milestone 6 merged** — a deterministic Python engine (no LLM) with unit-of-measure
+Current state: **Milestone 7 (import profiles)** — a deterministic Python engine (no LLM) with unit-of-measure
 normalisation and evidence-based duplicate detection, a labelled synthetic evaluation set, a CLI and
-a local Streamlit web app. See `docs/architecture.md`.
+a local Streamlit web app, plus optional, explicitly selected import profiles for other CSV layouts.
+See `docs/architecture.md`; Milestone 7's approved deviations and deferred follow-ups are listed in
+`docs/validation-plan.md` (section 5).
 
 ## Non-negotiable rules
 
@@ -35,7 +37,8 @@ a local Streamlit web app. See `docs/architecture.md`.
 src/opsresolve/
   models.py      Pydantic domain models (records, exceptions, validation issues)
   config.py      MatchConfig: tolerances & severity thresholds (env: OPSRESOLVE_*)
-  ingestion.py   CSV -> validated records + ValidationIssues   (Pandas + Pydantic; no rules)
+  profiles.py    Import profiles: load/validate JSON, strict number & date parsers   (reads no CSV; no rules)
+  ingestion.py   CSV -> validated records + ValidationIssues   (Pandas + Pydantic; no rules; optional profile)
   matching.py    Group invoices/receipts under PO lines by (po_number, sku)   (pure)
   uom.py         Convert documents to the PO line's unit via per-SKU table    (pure)
   detection.py   Exception rules, amounts, severity, recommended actions     (pure)
@@ -47,8 +50,9 @@ src/opsresolve/
 app.py           Streamlit local web app (layout only; run: streamlit run app.py)
 data/sample/     Synthetic CSVs + README describing every seeded scenario
 data/evaluation/ Labelled evaluation dataset (scenarios.csv, expected_exceptions.csv)
-tests/           Pytest suite (unit, end-to-end, evaluation, web-app helpers, Streamlit AppTest UI)
-docs/            architecture.md, validation-plan.md
+tests/           Pytest suite (unit, end-to-end, evaluation, web-app helpers, Streamlit AppTest UI, import profiles)
+tests/fixtures/profiles/  Import-profile fixtures; reformatted copies of the sample and evaluation data (each with a README)
+docs/            architecture.md, validation-plan.md; examples/import-profile-example.json
 ```
 
 ## Commands
@@ -78,3 +82,13 @@ python -m streamlit run app.py   # local web app on http://localhost:8501
 - Keep dependencies minimal (pandas, pydantic; pytest for dev; Streamlit only in the optional `app` extra).
 - The web app must stay a thin layer: no business rules in `app.py` or `webapp.py`, uploaded text never
   rendered as raw Markdown/HTML, and the server bound to localhost with telemetry off.
+- Import profiles: never discover or guess a profile, delimiter, encoding or format; a profile is used only
+  when explicitly selected. Without a profile, data ingestion and reconciliation must stay unchanged: the same
+  records, validation issues, exceptions and report content as before profiles existed (the no-profile tests
+  in `tests/test_ingestion_profiles.py` fail if profile code is reached). This guarantee does not cover
+  everything else: Milestone 7's documented deviations, such as the web app's profile uploader and the
+  ambiguous `--p` abbreviation, are listed in `docs/validation-plan.md` (section 5). Keep the allowlists
+  strict, reject values that do not match the declared format, and keep
+  `docs/examples/import-profile-example.json` valid (tested in `tests/test_app_ui.py`, which needs the `app`
+  extra; CI installs it). The evaluation command has no profile option. Use `--profile` in full on the command
+  line (`--p` is ambiguous between `--profile` and `--purchase-orders`; `--pr` resolves to `--profile`).
