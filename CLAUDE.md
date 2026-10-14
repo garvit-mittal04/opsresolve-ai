@@ -25,6 +25,11 @@ See `docs/architecture.md`; Milestone 7's approved deviations and deferred follo
 2. **Do not invent root causes.** Exceptions state what differs, by how much, and the
    evidence. Recommended actions describe how to investigate/resolve; they never assert *why*
    a discrepancy happened. Duplicates are always "possible" until a person confirms.
+   Exception: the separate investigation layer (`investigation.py`) may list candidate
+   explanations from a fixed, reviewed catalogue, each checked deterministically against cited
+   records and labelled "consistent with the data — not confirmed", "contradicted by the data"
+   or "can't be checked". It never states that a cause is confirmed and never changes
+   exceptions or recommended actions.
 3. **Do not claim customer validation** or real-world accuracy. Sample data is synthetic and
    all supplier names are fictional.
 4. **Never silently repair input.** Invalid rows are rejected and reported with file, line and
@@ -49,6 +54,7 @@ src/opsresolve/
   webapp.py      Helpers for app.py: temp-file runs, summaries, safe downloads, optional AI explanation helpers (no rules, no Streamlit)
   evaluation.py  Scores the pipeline against data/evaluation's answer key    (P/R/F1)
   explanation.py Evidence packs, the AI answer contract and its deterministic validator (pure; no LLM)
+  investigation.py Candidate explanations checked against cited records (fixed catalogue; pure; no LLM)
   ai.py          Optional Anthropic provider: config, request, pseudonymisation, explain_exception
   cli.py         Command-line entry point
 app.py           Streamlit local web app (layout only; run: streamlit run app.py)

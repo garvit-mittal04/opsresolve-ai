@@ -1,0 +1,24 @@
+po_number,line_number,supplier_id,supplier_name,sku,description,quantity_ordered,unit_price,currency,order_date,unit_of_measure
+P-1001,1,SUP-A01,Alder Components (fictional),SKU-A,Bracket,100,5.00,USD,2026-09-01,
+P-1002,1,SUP-B02,Birch Fittings (fictional),SKU-B,Washer,50,2.00,USD,2026-09-01,
+P-1003,1,SUP-C03,Cedar Parts (fictional),SKU-C,Gasket box,12,24.00,USD,2026-09-01,
+P-2001,1,SUP-D04,Dogwood Supply (fictional),SKU-D,Spring,10,3.00,USD,2026-09-01,
+P-3003,1,SUP-E05,Elm Industrial (fictional),SKU-E,Clip,5,1.00,USD,2026-09-01,
+P-3008,1,SUP-E05,Elm Industrial (fictional),SKU-E,Clip,5,1.00,USD,2026-09-02,
+P-4001,1,SUP-F06,Fir Metals (fictional),SKU-F,Plate,20,6.00,USD,2026-09-01,
+P-5001,1,SUP-G07,Gum Tree Tools (fictional),SKU-G,Drill bit,30,7.00,USD,2026-09-01,
+P-6001,1,SUP-H08,Hazel Hydraulics (fictional),SKU-H,Valve,10,8.00,USD,2026-09-01,
+P-6002,1,SUP-H08,Hazel Hydraulics (fictional),SKU-H,Valve,5,8.00,USD,2026-09-02,
+P-7001,1,SUP-J09,Juniper Electric (fictional),SKU-J,Relay,10,9.50,USD,2026-09-01,
+P-7002,1,SUP-J09,Juniper Electric (fictional),SKU-J,Relay,10,10.00,USD,2026-06-01,
+P-8001,1,SUP-K10,Kauri Packaging (fictional),SKU-K,Carton,10,4.00,USD,2026-09-01,
+P-8002,1,SUP-K10,Kauri Packaging (fictional),SKU-K,Carton,10,4.20,USD,2026-09-02,
+P-9001,1,SUP-L11,Larch Logistics (fictional),SKU-L,Pallet wrap,10,2.50,USD,2026-09-01,
+P-1101,1,SUP-M12,Maple Supplies (fictional),SKU-M,Cable tie,24,1.50,USD,2026-09-01,
+P-1201,1,SUP-N13,Nutmeg Tools (fictional),SKU-N,Hinge,40,2.00,USD,2026-09-01,
+P-1301,1,SUP-O14,Olive Packaging (fictional),SKU-O,Label roll,24,3.00,USD,2026-09-01,
+P-1401,1,SUP-P15,Poplar Hardware (fictional),SKU-P,Bolt,30,1.00,USD,2026-09-01,
+P-1501,1,SUP-Q16,Quince Fasteners (fictional),SKU-Q,Rivet,100,0.10,USD,2026-09-01,EA
+P-1502,1,SUP-Q16,Quince Fasteners (fictional),SKU-Q,Rivet,100,1.00,USD,2026-08-01,BOX
+P-1503,1,SUP-Q16,Quince Fasteners (fictional),SKU-Q,Rivet,100,0.10,USD,2026-08-15,EA
+P-1601,1,SUP-R17,Rowan Chemicals (fictional),SKU-R,Solvent,50,2.00,USD,2026-09-01,
