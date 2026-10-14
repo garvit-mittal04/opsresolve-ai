@@ -10,6 +10,8 @@ OpsResolve finds discrepancies between **purchase orders**, **supplier invoices*
 > calculations are rule-based Python using exact decimal arithmetic; no LLM is used for them. An optional,
 > separately installed module can ask an AI model to explain one exception from its evidence (advisory
 > only, see [AI explanations](#ai-explanations-optional)); the web app offers it per finding, off by default.
+> Deterministic [investigation checks](#investigation-checks) list candidate explanations for a finding and
+> test each against the loaded records; they are never confirmed causes.
 > Sample data is synthetic; the tool has not been validated on real customer or supplier data.
 
 ## What it does
@@ -29,6 +31,9 @@ OpsResolve finds discrepancies between **purchase orders**, **supplier invoices*
 6. Calculates quantity differences and amount impact exactly.
 7. Writes a readable Markdown report plus CSV exports, ordered by severity, from the CLI or from the
    [local web app](#local-web-app), which also lets you filter and inspect findings in a browser.
+8. Optionally checks candidate explanations for each finding against the loaded records
+   ([investigation checks](#investigation-checks)): shown in the web app and, on request, written by the CLI
+   to `investigations.csv`. They never change a finding and are never presented as confirmed causes.
 
 See [`docs/architecture.md`](docs/architecture.md) for the rule table and
 [`docs/validation-plan.md`](docs/validation-plan.md) for how correctness is tested.
@@ -65,6 +70,9 @@ python -m opsresolve --fail-on-exceptions
 
 # Files exported in another layout, read with an import profile (see "Import profiles")
 python -m opsresolve --data-dir path/to/export --profile docs/examples/import-profile-example.json
+
+# Also write investigations.csv (see "Investigation checks"); the other files are the same either way
+python -m opsresolve --with-investigations
 ```
 
 Outputs (in `reports/` by default, git-ignored):
@@ -74,8 +82,13 @@ Outputs (in `reports/` by default, git-ignored):
 | `exception_report.md` | Input summary, validation issues, exception summary, and each exception with evidence and recommended action |
 | `exceptions.csv` | One row per exception |
 | `validation_issues.csv` | One row per rejected field/row |
+| `investigations.csv` | Only with `--with-investigations`: one row per investigation check (see [Investigation checks](#investigation-checks)) |
 
-The installed console script `opsresolve` is equivalent to `python -m opsresolve`.
+The installed console script `opsresolve` is equivalent to `python -m opsresolve`. Exit status: 0 on success,
+1 with `--fail-on-exceptions` when anything is found, 2 for invalid configuration or an invalid import
+profile, and 3 when `--with-investigations` was given but the checks could not be prepared (the other report
+files are then complete and `investigations.csv` is not written). Exit status 3 takes precedence over 1: with
+`--fail-on-exceptions`, a run that finds exceptions and cannot prepare the checks exits 3.
 
 ## Local web app
 
@@ -123,7 +136,9 @@ It opens `http://localhost:8501` in your browser; stop it with `Ctrl+C` in the t
 - **Exceptions:** filter by severity and type, search by PO, SKU, supplier, invoice or GRN number, and
   inspect one finding: expected vs actual, amount impact, recommended next step, the evidence rows
   (with CSV line numbers) and every note from the engine. Possible duplicates are alerts for human
-  review, not confirmed duplicates.
+  review, not confirmed duplicates. The finding's [investigation checks](#investigation-checks) follow:
+  each candidate explanation with its status, the observations behind it, what is needed to decide, how to
+  confirm it, and the cited records (file and line).
 - **Validation issues:** shown separately, with the uploaded file name, line, field, value and problem.
   These rows were rejected and excluded from matching; correct them before relying on the findings.
 - **Downloads:** exceptions CSV, validation-issues CSV and the Markdown summary report, generated from
@@ -208,6 +223,62 @@ and field names; failures show fixed messages. In the web app a request is given
 retried, unless `OPSRESOLVE_AI_TIMEOUT_SECONDS` or `OPSRESOLVE_AI_MAX_RETRIES` is set. The send button is
 disabled while a request for that finding runs, so one finding has at most one request at a time. Explanations
 are kept in memory for the current run only and are not saved.
+
+## Investigation checks
+
+For some findings, OpsResolve lists **candidate explanations** from a fixed, reviewed catalogue and checks
+each one deterministically (exact `Decimal` comparisons, no AI, no network) against the records of the loaded
+files. A candidate explanation is a hypothesis to investigate, **never a confirmed root cause**: the checks do
+not change any finding, amount, severity, ID, recommended action or default report.
+
+Each check gets one of three evidence statuses:
+
+| Status | Meaning |
+|---|---|
+| Consistent with the data — not confirmed | The loaded records match what the explanation would produce. A person must verify it; several explanations can be consistent at once. When several records fit, all are cited and the check says the match is not unique. |
+| Contradicted by the data | Comparable, complete records exist and none of them fits. |
+| Can't be checked | The records needed are missing, were (or may have been) rejected during validation, are in another or unstated unit, or cannot rule the explanation out. The check says what would be needed. |
+
+**Check failed — nothing concluded** is not an evidence status: the check itself hit an error (a defect).
+Only that fixed label is shown, never the error's type or message; the other checks still run.
+
+| Check | Applies to | Consistent when |
+|---|---|---|
+| Receipt not posted | Billed more than received; missing goods receipt | Invoiced quantity is within the ordered quantity. Never "contradicted": above the ordered quantity it can't be checked, since an unposted delivery above the order cannot be ruled out from the records alone |
+| Unit mix-up | Quantity mismatches (billed or over-receipt); price mismatches | The two totals (or prices) differ exactly by a per-SKU conversion factor, or converting exactly one document by that factor makes them equal. Needs a conversion row for the SKU |
+| Mistyped PO number | Missing purchase order (an invoice or receipt citing an unknown PO) | A PO line of the same supplier and SKU has a number that is equal ignoring letter case, separators and leading zeros of digit groups, or differs by one character or by two swapped adjacent characters |
+| Document under another PO | Missing goods receipt; missing invoice; over-receipt | Another document of the same supplier and SKU has exactly the needed quantity (a receipt of the invoiced quantity, an invoice of the received quantity), or another PO line has exactly the excess still open |
+| Price from another order | Price mismatch | Another PO line of the same supplier, SKU, currency and unit has exactly the invoice's unit price |
+
+Other finding types (supplier, currency and unit-of-measure mismatches, possible duplicates) have no checks.
+
+**Evidence references.** Within one finding, checks are numbered H1, H2, … and every cited record R1, R2, …
+with its file, line in the uploaded CSV (the header is line 1) and document number. Every observation cites
+the records it relies on, including records outside the finding's own evidence, such as another PO line.
+
+**Where to see them.** In the web app, in each finding's detail panel (computed once per run and recomputed
+whenever inputs, settings or the run change). From the CLI, `--with-investigations` writes `investigations.csv`
+next to the other reports: one row per check (`exception_id`, `exception_type`, `po_number`, `sku`, `check_id`,
+`check`, `candidate_explanation`, `status`, `status_label`, `observations`, `needed_to_decide`, `how_to_confirm`,
+`records`), or one row for a finding with no checks. **Unlike the CLI's other CSV files, every cell of
+`investigations.csv` is protected against spreadsheet formulas**: text starting with `=`, `+`, `-`, `@`, a tab or
+a carriage return gets a leading `'` (plain numbers such as `-50.00` are unchanged), the same rule as the web
+app's downloads. The other CLI files are written exactly as before.
+
+**Limitations.**
+
+- Matching is strict and exact: the same supplier and SKU, exact quantities and prices, and quantities or
+  prices of different PO lines only in the same unit (or with no unit stated on either). Records in another
+  unit are never converted, only excluded, so a real match in another unit gives "can't be checked".
+- A unit mix-up on some, but not all, of several invoices or receipts of one PO line gives "can't be checked".
+- Conservative handling of rejected rows: a rejected row whose PO number or SKU could not be read, or a
+  file-level problem, makes the affected checks "can't be checked" for that file.
+- Currency differences are not treated as unit differences: other orders in another currency are not compared.
+- "Consistent" means only that the loaded records fit. Missing or late documents (for example a goods
+  receipt posted after the export) are outside what the checks can see.
+- The checks are not used by the AI explanations, the evaluation or the default reports, and the CLI does not
+  remove an `investigations.csv` left by an earlier run unless `--with-investigations` is given again.
+- Tested only on synthetic data (`tests/fixtures/investigations/`, separate from the evaluation answer key).
 
 ## Input format
 
@@ -486,12 +557,14 @@ covered by the unit tests), uses one currency for prices, and measures only the 
 ```
 src/opsresolve/   models, config, profiles (import profiles), ingestion, matching, uom, detection,
                   pipeline, reporting, cli, evaluation, webapp (helpers for the web app),
-                  explanation (evidence packs and answer validation), ai (optional AI provider)
+                  explanation (evidence packs and answer validation), ai (optional AI provider),
+                  investigation (deterministic investigation checks)
 app.py            Streamlit web app (layout only; see "Local web app")
 .streamlit/       local-only Streamlit settings (localhost, no telemetry)
 data/sample/      synthetic CSVs + README listing every seeded scenario and expected result
 data/evaluation/  labelled evaluation dataset: inputs, scenarios.csv, expected_exceptions.csv
-tests/            unit and end-to-end tests; tests/fixtures/profiles/ holds import-profile fixtures
+tests/            unit and end-to-end tests; tests/fixtures/profiles/ holds import-profile fixtures,
+                  tests/fixtures/investigations/ the investigation-check fixtures
 docs/             architecture and validation plan; docs/examples/ holds the example import profile
 CLAUDE.md         persistent project instructions for contributors and AI assistants
 ```

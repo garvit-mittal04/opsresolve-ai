@@ -9,11 +9,15 @@ businesses: discrepancies between purchase orders (PO), supplier invoices and go
 notes (GRN). It finds the discrepancy, quantifies it, lists the evidence and recommends a
 corrective action.
 
-Current state: **Milestone 8 (AI explanations), Stages A–C** — a deterministic Python engine (no LLM in any
+Current state: **Milestone 8, Stages A–D** — a deterministic Python engine (no LLM in any
 calculation) with unit-of-measure normalisation and evidence-based duplicate detection, a labelled synthetic
 evaluation set, a CLI and a local Streamlit web app, optional, explicitly selected import profiles for other
-CSV layouts, and an optional AI layer that explains one exception from its evidence (offered per finding in the
-web app, off by default; not used by the engine, CLI or reports; see `docs/architecture.md`, "AI explanations").
+CSV layouts, an optional AI layer that explains one exception from its evidence (offered per finding in the
+web app, off by default; not used by the engine, CLI or reports; see `docs/architecture.md`, "AI explanations"),
+and deterministic investigation checks (Stage D) that test candidate explanations from a fixed catalogue
+against the loaded records, labelled "consistent with the data — not confirmed", "contradicted by the data" or
+"can't be checked" (shown per finding in the web app; written by the CLI to `investigations.csv` only with
+`--with-investigations`; never confirmed causes; see `docs/architecture.md`, "Investigation checks").
 See `docs/architecture.md`; Milestone 7's approved deviations and deferred follow-ups are listed in
 `docs/validation-plan.md` (section 5).
 
@@ -62,6 +66,7 @@ data/sample/     Synthetic CSVs + README describing every seeded scenario
 data/evaluation/ Labelled evaluation dataset (scenarios.csv, expected_exceptions.csv)
 tests/           Pytest suite (unit, end-to-end, evaluation, web-app helpers, Streamlit AppTest UI, import profiles)
 tests/fixtures/profiles/  Import-profile fixtures; reformatted copies of the sample and evaluation data (each with a README)
+tests/fixtures/investigations/  Investigation-check fixtures (scenarios A–R) with hand-written expected results (README)
 docs/            architecture.md, validation-plan.md; examples/import-profile-example.json
 ```
 
@@ -104,12 +109,16 @@ python -m streamlit run app.py   # local web app on http://localhost:8501
   `docs/examples/import-profile-example.json` valid (tested in `tests/test_app_ui.py`, which needs the `app`
   extra; CI installs it). The evaluation command has no profile option. Use `--profile` in full on the command
   line (`--p` is ambiguous between `--profile` and `--purchase-orders`; `--pr` resolves to `--profile`).
-- Investigation checks: only `webapp.py` imports `opsresolve.investigation` (the engine, CLI, reports, evaluation, AI
-  layer and `app.py` must not). They run locally, are computed once per run (`webapp.cached_investigations`, kept with
-  the stored run and replaced when inputs, settings or the run change), and are shown as table cells and `st.text`,
-  never as Markdown. "Check failed — nothing concluded" is an operational failure, not an evidence status: the page
-  shows only that fixed label, never the error type, message or traceback; an error while preparing the checks shows
-  a fixed message. Tests run the checks with `strict=True` so unexpected failures are never hidden.
+- Investigation checks: only `webapp.py` and `cli.py` import `opsresolve.investigation` (the engine, reports,
+  evaluation, AI layer and `app.py` must not; `reporting.write_investigations_csv` only renders what it is given).
+  They run locally, are computed once per run (`webapp.cached_investigations`, kept with the stored run and replaced
+  when inputs, settings or the run change), and are shown as table cells and `st.text`, never as Markdown. The CLI
+  writes `investigations.csv` only with `--with-investigations`, with every cell neutralised against spreadsheet
+  formulas (unlike the other CLI CSVs, which must stay byte-identical); without the option its output is unchanged.
+  "Check failed — nothing concluded" is an operational failure, not an evidence status. The page shows the check's
+  identifier with that fixed label; the CSV row also names the check and its fixed candidate explanation. Neither
+  ever shows the error message, exception type or traceback; an error while preparing the checks shows a fixed
+  message (the CLI exits 3). Tests run the checks with `strict=True` so unexpected failures are never hidden.
 - AI explanations: only `ai.py` imports `anthropic` (lazily). Among application modules only `webapp.py` may import
   `opsresolve.ai`; it prepares readiness, request previews and display results. The engine, CLI, reports, evaluation
   and `app.py` must not. Model-written text is shown as literal text (`st.text` or table cells), never through

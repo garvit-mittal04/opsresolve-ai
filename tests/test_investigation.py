@@ -567,13 +567,13 @@ def imported_modules(path: Path) -> set[str]:
     return names
 
 
-def test_the_investigation_layer_is_pure_and_used_only_by_the_web_helpers():
+def test_the_investigation_layer_is_pure_and_used_only_by_the_web_helpers_and_the_cli():
     imported = imported_modules(REPO / "src" / "opsresolve" / "investigation.py")
     for forbidden in ("opsresolve.ai", "opsresolve.explanation", "opsresolve.webapp", "opsresolve.reporting",
                       "opsresolve.cli", "anthropic", "streamlit", "pandas", "logging"):
         assert not any(name == forbidden or name.startswith(forbidden + ".") for name in imported), forbidden
     users = [p.name for p in [*(REPO / "src" / "opsresolve").glob("*.py"), REPO / "app.py"]
              if p.name != "investigation.py" and "opsresolve.investigation" in imported_modules(p)]
-    # D2: only the web helpers use it (app.py goes through them); the CLI (D3) comes later. The AI layer, the
-    # engine and the reports never see it.
-    assert users == ["webapp.py"]
+    # The web helpers (D2; app.py goes through them) and the CLI's opt-in investigations.csv (D3) use it. The AI
+    # layer, the engine, the evaluation and the reports never import it (reporting only renders what it is given).
+    assert sorted(users) == ["cli.py", "webapp.py"]
