@@ -64,7 +64,9 @@ src/opsresolve/
 app.py           Streamlit local web app (layout only; run: streamlit run app.py)
 data/sample/     Synthetic CSVs + README describing every seeded scenario
 data/evaluation/ Labelled evaluation dataset (scenarios.csv, expected_exceptions.csv)
-tests/           Pytest suite (unit, end-to-end, evaluation, web-app helpers, Streamlit AppTest UI, import profiles)
+tests/           Pytest suite (unit, end-to-end, evaluation, web-app helpers, Streamlit AppTest UI, import profiles;
+                 evidence packs test_explanation.py, AI provider test_ai.py, investigation checks
+                 test_investigation.py and the --with-investigations CSV test_investigations_csv.py)
 tests/fixtures/profiles/  Import-profile fixtures; reformatted copies of the sample and evaluation data (each with a README)
 tests/fixtures/investigations/  Investigation-check fixtures (scenarios A–R) with hand-written expected results (README)
 docs/            architecture.md, validation-plan.md; examples/import-profile-example.json

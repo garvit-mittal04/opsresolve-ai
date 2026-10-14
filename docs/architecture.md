@@ -1,6 +1,6 @@
 # OpsResolve AI — Architecture
 
-## Scope (as of Milestone 7)
+## Scope (as of Milestone 8, Stage D)
 
 A deterministic three-way-match exception investigator:
 
@@ -14,11 +14,16 @@ A deterministic three-way-match exception investigator:
 6. Calculate discrepancies exactly.
 7. Produce a readable exception report (Markdown + CSV + console summary) from the CLI or the local
    Streamlit web app, and score the engine against a labelled synthetic dataset (`evaluation.py`).
+8. Optionally (Milestone 8):
+   - explain one exception with an AI model (Stages A–C; offered per finding in the web app, off by default);
+   - check candidate explanations for each exception deterministically against the loaded records (Stage D;
+     shown in the web app and, with `--with-investigations`, written by the CLI to `investigations.csv`).
 
-No LLM is used in matching, detection, calculations, reports, the CLI or the web app. Milestone 8 adds an
-optional, separate layer that asks a model to explain one exception (see AI explanations below), and a
-deterministic investigation layer that checks candidate explanations against the loaded records (Stage D, see
-Investigation checks below); neither changes an exception.
+Import profiles (item 1) were added in Milestone 7; their approved deviations and deferred follow-ups are below
+and in `docs/validation-plan.md` (section 5). No LLM is used in matching, detection, calculations, reports, the
+CLI, the evaluation or the investigation checks. The only use of a model is the optional, separate AI-explanation
+layer (see AI explanations below), offered per finding in the web app; the investigation layer (see Investigation
+checks below) is deterministic. Neither changes an exception.
 
 ## Data flow
 
