@@ -12,6 +12,8 @@ comes from uploaded files is shown in tables or escaped, never as raw Markdown.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 from pydantic import ValidationError
@@ -40,6 +42,7 @@ st.markdown(
 )
 
 SEVERITY_ORDER = [Severity.HIGH, Severity.MEDIUM, Severity.LOW]
+EXAMPLE_PROFILE = Path(__file__).resolve().parent / "docs" / "examples" / "import-profile-example.json"
 
 
 def badge(severity: Severity) -> str:
@@ -77,14 +80,15 @@ def current_config() -> MatchConfig | None:
         return None
 
 
-def collect_inputs() -> dict[str, Upload | None]:
+def collect_inputs() -> tuple[dict[str, Upload | None], Upload | None]:
+    """The data files and the optional import profile (never used with the bundled sample)."""
     st.subheader("1. Input files")
     source = st.radio("Data source", ["Upload my files", "Use bundled sample data"], horizontal=True,
                       key="source", label_visibility="collapsed")
     if source == "Use bundled sample data":
         st.caption("Synthetic sample from `data/sample/` (read only): 3 validation issues and 18 exceptions "
                    "are seeded deliberately.")
-        return webapp.sample_uploads()
+        return webapp.sample_uploads(), None
 
     uploads: dict[str, Upload | None] = {}
     # Lay the grid out row by row, so narrow screens stack the files in reading order.
@@ -103,7 +107,30 @@ def collect_inputs() -> dict[str, Upload | None]:
                 st.download_button("Download template", webapp.template_csv(spec.key),
                                    file_name=f"{spec.key}_template.csv", mime="text/csv",
                                    key=f"template_{spec.key}")
-    return uploads
+    return uploads, collect_profile()
+
+
+def collect_profile() -> Upload | None:
+    file = st.file_uploader("Import profile (optional, .json)", type=["json"], key="upload_profile")
+    st.caption("With a valid import profile, files are read in the formats it declares; the "
+               "'Expected format' notes describe the built-in format.")
+    with st.expander("What is an import profile?"):
+        st.markdown("An import profile is a small JSON file that declares how your exports are written: the "
+                    "delimiter, text encoding, date format, decimal and thousands separators, and which of your "
+                    "column headers holds each field. Nothing is guessed: values that do not match the declared "
+                    "format are rejected and listed as validation issues.")
+        st.download_button("Download example profile", EXAMPLE_PROFILE.read_bytes(),
+                           file_name="import-profile-example.json", mime="application/json",
+                           key="example_profile")
+    return Upload(file.name, file.getvalue()) if file is not None else None
+
+
+def show_profile_check(check: webapp.ProfileCheck) -> None:
+    if check.valid:
+        st.success(webapp.profile_caption(check.profile, "Import profile loaded"))
+        return
+    st.error(f"The import profile is not valid ({len(check.problems)} problem(s)). Fix or remove it to run.")
+    st.dataframe(pd.DataFrame({"Problem": list(check.problems)}), hide_index=True, width="stretch")
 
 
 def show_summary(summary: webapp.RunSummary) -> None:
@@ -222,10 +249,14 @@ st.caption("Findings are reconciliation exceptions for human review, not approva
            "determinations. This tool has not been validated on real supplier data.")
 
 config = current_config()
-uploads = collect_inputs()
+uploads, profile_upload = collect_inputs()
+profile_check = webapp.check_profile(profile_upload) if profile_upload is not None else None
+if profile_check is not None:
+    show_profile_check(profile_check)
+profile_invalid = profile_check is not None and not profile_check.valid
 
 missing = [spec.label for spec in INPUTS if spec.required and uploads.get(spec.key) is None]
-current = webapp.fingerprint(uploads, config) if config is not None else None
+current = webapp.fingerprint(uploads, config, profile_upload) if config is not None else None
 stored = st.session_state.get("last_run")
 if stored is not None and stored["fingerprint"] != current:
     del st.session_state["last_run"]  # inputs or settings changed: never show results for other data
@@ -235,10 +266,14 @@ if stored is not None and stored["fingerprint"] != current:
 st.subheader("2. Run")
 if missing:
     st.caption("Waiting for: " + ", ".join(missing) + ".")
-if st.button("Run reconciliation", type="primary", disabled=bool(missing) or config is None, key="run_button"):
+if profile_invalid:
+    st.caption("Waiting for a valid import profile (or remove it to use the built-in format).")
+if st.button("Run reconciliation", type="primary", disabled=bool(missing) or config is None or profile_invalid,
+             key="run_button"):
     with st.spinner("Reconciling…"):
         try:
-            result = webapp.run_reconciliation(uploads, config)
+            profile = profile_check.profile if profile_check is not None else None
+            result = webapp.run_reconciliation(uploads, config, profile)
         except MissingInputError as exc:
             st.error(str(exc))
         except Exception as exc:  # unexpected engine failure: report it, keep no partial results
@@ -255,6 +290,8 @@ else:
     # The fingerprint matched, so the contents are the ones this result was computed from; take the
     # file names from the current uploads (the same bytes may have been re-uploaded under a new name).
     names = webapp.display_names(uploads)
+    if result.profile is not None:  # the profile this result was actually read with
+        st.markdown(webapp.profile_caption(result.profile))
     show_summary(webapp.summarize(result, names))
     tab_exc, tab_val, tab_dl = st.tabs([
         f"Exceptions ({len(result.exceptions)})", f"Validation issues ({len(result.dataset.issues)})", "Downloads"])
