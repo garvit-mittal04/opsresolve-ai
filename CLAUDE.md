@@ -25,6 +25,11 @@ See `docs/architecture.md`; Milestone 7's approved deviations and deferred follo
 2. **Do not invent root causes.** Exceptions state what differs, by how much, and the
    evidence. Recommended actions describe how to investigate/resolve; they never assert *why*
    a discrepancy happened. Duplicates are always "possible" until a person confirms.
+   Exception: the separate investigation layer (`investigation.py`) may list candidate
+   explanations from a fixed, reviewed catalogue, each checked deterministically against cited
+   records and labelled "consistent with the data — not confirmed", "contradicted by the data"
+   or "can't be checked". It never states that a cause is confirmed and never changes
+   exceptions or recommended actions.
 3. **Do not claim customer validation** or real-world accuracy. Sample data is synthetic and
    all supplier names are fictional.
 4. **Never silently repair input.** Invalid rows are rejected and reported with file, line and
@@ -46,9 +51,10 @@ src/opsresolve/
   detection.py   Exception rules, amounts, severity, recommended actions     (pure)
   pipeline.py    Orchestration: ingestion -> matching -> uom -> detection
   reporting.py   Markdown / CSV / console rendering                         (no rules)
-  webapp.py      Helpers for app.py: temp-file runs, summaries, safe downloads, optional AI explanation helpers (no rules, no Streamlit)
+  webapp.py      Helpers for app.py: temp-file runs, summaries, safe downloads, investigation views, optional AI explanation helpers (no rules, no Streamlit)
   evaluation.py  Scores the pipeline against data/evaluation's answer key    (P/R/F1)
   explanation.py Evidence packs, the AI answer contract and its deterministic validator (pure; no LLM)
+  investigation.py Candidate explanations checked against cited records (fixed catalogue; pure; no LLM)
   ai.py          Optional Anthropic provider: config, request, pseudonymisation, explain_exception
   cli.py         Command-line entry point
 app.py           Streamlit local web app (layout only; run: streamlit run app.py)
@@ -98,6 +104,12 @@ python -m streamlit run app.py   # local web app on http://localhost:8501
   `docs/examples/import-profile-example.json` valid (tested in `tests/test_app_ui.py`, which needs the `app`
   extra; CI installs it). The evaluation command has no profile option. Use `--profile` in full on the command
   line (`--p` is ambiguous between `--profile` and `--purchase-orders`; `--pr` resolves to `--profile`).
+- Investigation checks: only `webapp.py` imports `opsresolve.investigation` (the engine, CLI, reports, evaluation, AI
+  layer and `app.py` must not). They run locally, are computed once per run (`webapp.cached_investigations`, kept with
+  the stored run and replaced when inputs, settings or the run change), and are shown as table cells and `st.text`,
+  never as Markdown. "Check failed — nothing concluded" is an operational failure, not an evidence status: the page
+  shows only that fixed label, never the error type, message or traceback; an error while preparing the checks shows
+  a fixed message. Tests run the checks with `strict=True` so unexpected failures are never hidden.
 - AI explanations: only `ai.py` imports `anthropic` (lazily). Among application modules only `webapp.py` may import
   `opsresolve.ai`; it prepares readiness, request previews and display results. The engine, CLI, reports, evaluation
   and `app.py` must not. Model-written text is shown as literal text (`st.text` or table cells), never through

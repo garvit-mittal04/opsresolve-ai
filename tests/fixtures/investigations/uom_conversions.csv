@@ -1,0 +1,8 @@
+sku,uom,base_uom,units_per_uom
+SKU-B,BOX,EA,10
+SKU-C,BOX,EA,12
+SKU-M,BOX,EA,12
+SKU-O,BOX,EA,12
+SKU-P,BOX,EA,12
+SKU-Q,BOX,EA,10
+SKU-R,BOX,EA,5
