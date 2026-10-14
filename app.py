@@ -8,6 +8,11 @@ Run from the repository root:
 This file only lays out the page. Reconciliation is done by the existing
 pipeline through ``opsresolve.webapp``; no business rules live here. Text that
 comes from uploaded files is shown in tables or escaped, never as raw Markdown.
+
+Optional AI explanations are off until the user turns them on, and a request is
+sent only when the user presses the send button for one finding. Text written by
+the model is shown literally (``st.text`` and table cells), the request preview
+with ``st.code``, and failures with the fixed messages from ``opsresolve.webapp``.
 """
 
 from __future__ import annotations
@@ -78,6 +83,82 @@ def current_config() -> MatchConfig | None:
     except ValidationError as exc:
         st.sidebar.error(f"Invalid rule settings: {exc.error_count()} problem(s).")
         return None
+
+
+def ai_sidebar() -> webapp.AIStatus | None:
+    """Optional AI explanations: off by default. Returns the readiness when the user has turned them on."""
+    with st.sidebar:
+        st.header("AI explanations")
+        if not st.toggle("Enable AI explanations (optional)", value=False, key="ai_enabled"):
+            st.caption("Off. Reconciliation never uses AI; explanations are optional and advisory.")
+            return None
+        status = webapp.ai_status()
+        (st.success if status.ready else st.warning)(esc(status.message))
+        if status.ready:
+            st.caption(f"A request is given up after {status.config.timeout_seconds:g} seconds and retried "
+                       f"{status.config.max_retries} time(s).")
+        return status
+
+
+def show_ai_view(view: webapp.AIExplanationView) -> None:
+    """One AI result. Model-written text only through st.text and table cells; messages are fixed text."""
+    if view.status == "accepted":
+        st.info(esc(view.message))
+        st.text(view.explanation)
+        tables = [
+            ("Confirmed facts", [{"Fact": i.text, "Evidence": ", ".join(i.refs)} for i in view.confirmed_facts]),
+            ("Possible causes (unverified hypotheses)", [
+                {"Hypothesis": i.text, "How to check": i.check, "Evidence": ", ".join(i.refs)}
+                for i in view.possible_causes]),
+            ("Investigation steps", [{"Step": i.text, "Evidence": ", ".join(i.refs)}
+                                     for i in view.investigation_steps]),
+            ("Missing information", [{"Missing": item} for item in view.missing_information]),
+        ]
+        for title, rows in tables:
+            if rows:
+                st.caption(title)
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        st.text(view.sufficiency)
+    elif view.status == "rejected":
+        st.warning(esc(view.message))
+        st.dataframe(pd.DataFrame([{"Problem": code, "Field": location} for code, location in view.problems]),
+                     hide_index=True, width="stretch")
+    else:
+        (st.info if view.status == "unavailable" else st.error)(esc(view.message))
+
+
+def show_ai_explanation(result, exc, status: webapp.AIStatus, run_key: str) -> None:
+    """The optional AI section of the detail panel. Nothing is sent unless the send button is pressed."""
+    st.markdown("**AI explanation** (optional, advisory)")
+    if not status.ready:
+        st.caption(esc(status.message))
+        return
+    st.caption("Sending shares this finding's evidence with Anthropic: supplier ids are replaced by pseudonyms and "
+               "supplier names and item descriptions are left out, but document numbers, SKUs, quantities, prices, "
+               "amounts and dates are sent. The explanation is advisory and changes nothing above.")
+    if st.checkbox("Show the exact request that would be sent", key=f"ai_preview_{exc.exception_id}"):
+        preview = webapp.preview_ai_request(result, exc, status.config)
+        if preview.body is None:
+            st.warning(esc(preview.message))
+        else:
+            st.code(preview.body, language="json")
+    views = st.session_state.setdefault("ai_views", {})
+    guard = st.session_state.setdefault("ai_guard", webapp.AIRequestGuard())
+    key = (run_key, exc.exception_id)
+    guard.cancel_waiting(keep=key)  # a send not started for another finding is dropped, never sent later
+    if st.button("Send to Anthropic for an explanation", key=f"ai_send_{exc.exception_id}",
+                 disabled=guard.is_pending(key)) and guard.mark_pending(key):
+        st.rerun()  # show the button disabled while the request runs, so it cannot be pressed again
+    if guard.is_running(key):  # being sent by an earlier run of this page; never a second request
+        st.info(esc(webapp.AI_REQUEST_IN_PROGRESS))
+    elif guard.is_pending(key):
+        with st.spinner("Waiting for the AI explanation…"):
+            view = guard.run(key, lambda: webapp.request_ai_explanation(result, exc, status.config))
+            if view is not None:
+                views[key] = view
+        st.rerun()  # enable the button again and show the answer
+    if key in views:
+        show_ai_view(views[key])
 
 
 def collect_inputs() -> tuple[dict[str, Upload | None], Upload | None]:
@@ -158,7 +239,7 @@ def show_summary(summary: webapp.RunSummary) -> None:
             st.caption("No exceptions detected.")
 
 
-def show_exceptions(result) -> None:
+def show_exceptions(result, ai_status: webapp.AIStatus | None = None, run_key: str = "") -> None:
     exceptions = result.exceptions
     if not exceptions:
         st.info("No exceptions were detected by the current rules.")
@@ -211,6 +292,8 @@ def show_exceptions(result) -> None:
             st.markdown("**Notes from the engine**")
             for note in exc.notes:
                 st.markdown("- " + esc(note))
+        if ai_status is not None:
+            show_ai_explanation(result, exc, ai_status, run_key)
 
 
 def show_validation(result, names: dict[str, str]) -> None:
@@ -249,6 +332,7 @@ st.caption("Findings are reconciliation exceptions for human review, not approva
            "determinations. This tool has not been validated on real supplier data.")
 
 config = current_config()
+ai_status = ai_sidebar()
 uploads, profile_upload = collect_inputs()
 profile_check = webapp.check_profile(profile_upload) if profile_upload is not None else None
 if profile_check is not None:
@@ -260,6 +344,7 @@ current = webapp.fingerprint(uploads, config, profile_upload) if config is not N
 stored = st.session_state.get("last_run")
 if stored is not None and stored["fingerprint"] != current:
     del st.session_state["last_run"]  # inputs or settings changed: never show results for other data
+    st.session_state.pop("ai_views", None)  # and no AI explanation of them either
     stored = None
     st.info("Inputs or settings changed since the last run. Run the reconciliation again to see results.")
 
@@ -296,7 +381,7 @@ else:
     tab_exc, tab_val, tab_dl = st.tabs([
         f"Exceptions ({len(result.exceptions)})", f"Validation issues ({len(result.dataset.issues)})", "Downloads"])
     with tab_exc:
-        show_exceptions(result)
+        show_exceptions(result, ai_status, stored["fingerprint"])
     with tab_val:
         show_validation(result, names)
     with tab_dl:

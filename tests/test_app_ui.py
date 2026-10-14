@@ -499,3 +499,369 @@ def test_sample_mode_ignores_an_uploaded_profile():
     no_errors(at)
     assert metrics(at)["Exceptions"] == "18" and metrics(at)["Validation issues"] == "3"
     assert not at.success and not any(t.startswith("Import profile") for t in texts(at))
+
+
+# ---- optional AI explanations (C2): fakes only, network blocked, no real key -------------------------------------
+
+import socket  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from opsresolve import ai  # noqa: E402  (the tests may use it; app.py itself must not import it)
+from opsresolve.models import ExceptionType  # noqa: E402
+from opsresolve.pipeline import investigate_files  # noqa: E402
+
+FAKE_KEY = "sk-ant-test-key-never-sent-0123456789"  # fake; the fake SDK below is the only thing that sees it
+SAMPLE = REPO / "data" / "sample"
+
+
+class NetworkBlocked(AssertionError):
+    pass
+
+
+@pytest.fixture
+def offline(monkeypatch):
+    """No real connection, no real key, no OPSRESOLVE_AI_* settings from the developer's shell."""
+    def blocked(*args, **kwargs):
+        raise NetworkBlocked("a test tried to open a network connection")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked)
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.delenv(ai.API_KEY_VARIABLE, raising=False)
+    for name in ("MODEL", "EFFORT", "TIMEOUT_SECONDS", "MAX_RETRIES", "MAX_TOKENS"):
+        monkeypatch.delenv(f"OPSRESOLVE_AI_{name}", raising=False)
+
+
+def mismatch_id() -> str:
+    """The sample's supplier mismatch on PO 4500010015 (SUP-001 on the PO, SUP-009 on invoice RVX-00981)."""
+    result = investigate_files(SAMPLE / "purchase_orders.csv", SAMPLE / "invoices.csv", SAMPLE / "goods_received.csv")
+    [exc] = [e for e in result.exceptions
+             if e.exception_type is ExceptionType.SUPPLIER_MISMATCH and e.po_number == "4500010015"]
+    return exc.exception_id
+
+
+def good_answer(exception_id: str, explanation: str | None = None) -> dict:
+    return {
+        "exception_id": exception_id, "direction": "not_applicable",
+        "explanation": explanation or ("Invoice RVX-00981 is from supplier SUPPLIER-2, but PO 4500010015 was raised "
+                                       "with supplier SUPPLIER-1 (E1, E2)."),
+        "confirmed_facts": [{"statement": "PO 4500010015 was raised with supplier SUPPLIER-1.",
+                             "evidence_refs": ["E1"]}],
+        "possible_causes": [{"hypothesis": "The invoice may have been keyed against the wrong supplier.",
+                             "status": "unverified_hypothesis", "supporting_refs": ["E2"],
+                             "how_to_check": "Compare invoice RVX-00981 with the vendor master."}],
+        "investigation_steps": [{"step": "Check the remittance details on invoice RVX-00981.",
+                                 "evidence_refs": ["E2"]}],
+        "evidence_refs_used": ["E1", "E2"], "sufficiency": "partial",
+        "missing_information": ["The vendor master record."],
+    }
+
+
+class FakeSDK:
+    """Stands in for the Anthropic SDK: records every client and request, returns ``text`` or raises ``error``."""
+
+    class APIError(Exception):
+        pass
+
+    class APIConnectionError(APIError):
+        pass
+
+    class APITimeoutError(APIConnectionError):
+        pass
+
+    class APIStatusError(APIError):
+        status_code = 500
+
+    AuthenticationError = PermissionDeniedError = RateLimitError = APIStatusError
+
+    def __init__(self, text: str = "", error: Exception | None = None, stop_reason: str = "end_turn"):
+        self.text, self.error, self.stop_reason = text, error, stop_reason
+        self.clients, self.requests = [], []
+
+    def Anthropic(self, **settings):  # noqa: N802 (the SDK's name)
+        self.clients.append(settings)
+        return SimpleNamespace(messages=SimpleNamespace(create=self.create))
+
+    def create(self, **body):
+        self.requests.append(body)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text=self.text)], stop_reason=self.stop_reason,
+                               _request_id="req_secret_id")
+
+
+@pytest.fixture
+def ready(offline, monkeypatch):
+    """AI explanations ready: the SDK counts as installed, a fake key is set, and the fake SDK is used."""
+    sdk = FakeSDK(json.dumps(good_answer(mismatch_id())))
+    monkeypatch.setattr(ai, "sdk_available", lambda: True)
+    monkeypatch.setattr(ai, "_import_sdk", lambda: sdk)
+    monkeypatch.setenv(ai.API_KEY_VARIABLE, FAKE_KEY)
+    return sdk
+
+
+def sample_with_ai(enabled: bool = True) -> AppTest:
+    at = run(use_sample(start()))
+    if enabled:
+        at = at.toggle(key="ai_enabled").set_value(True).run()
+    return at.selectbox(key="detail_id").set_value(
+        next(o for o in at.selectbox(key="detail_id").options if o.startswith(mismatch_id()))).run()
+
+
+def send(at: AppTest) -> AppTest:
+    return at.button(key=f"ai_send_{mismatch_id()}").click().run()
+
+
+def everything_shown(at: AppTest) -> str:
+    groups = (at.markdown, at.caption, at.success, at.error, at.info, at.warning, at.text, at.code)
+    shown = [e.value for group in groups for e in group]
+    shown += [d.value.to_csv() for d in at.dataframe]
+    return "\n".join(shown)
+
+
+def ai_buttons(at: AppTest) -> list[str]:
+    return [b.key for b in at.button if b.key and b.key.startswith("ai_")]
+
+
+# ---- off by default ------------------------------------------------------------------------------------------------
+
+def test_ai_is_off_by_default_and_nothing_ai_runs(offline, monkeypatch):
+    monkeypatch.setattr(webapp, "ai_status", lambda *a, **k: pytest.fail("AI readiness checked while off"))
+    monkeypatch.setattr(webapp, "request_ai_explanation", lambda *a, **k: pytest.fail("AI request while off"))
+    at = sample_with_ai(enabled=False)
+    no_errors(at)
+    assert at.toggle(key="ai_enabled").value is False
+    assert ai_buttons(at) == [] and not at.checkbox and not at.code
+    assert "AI explanation" not in " ".join(m.value for m in at.markdown)
+    assert metrics(at)["Exceptions"] == "18"
+
+
+# ---- not ready -----------------------------------------------------------------------------------------------------
+
+def test_without_the_sdk_the_reason_is_shown_and_nothing_can_be_sent(offline, monkeypatch):
+    monkeypatch.setattr(ai, "sdk_available", lambda: False)
+    monkeypatch.setenv(ai.API_KEY_VARIABLE, FAKE_KEY)
+    at = sample_with_ai()
+    no_errors(at)
+    assert webapp.escape_markdown(webapp.AI_STATUS_MESSAGES["sdk_missing"]) in [w.value for w in at.warning]
+    assert ai_buttons(at) == [] and not at.code
+
+
+def test_without_a_key_the_reason_is_shown_and_nothing_can_be_sent(offline, monkeypatch):
+    monkeypatch.setattr(ai, "sdk_available", lambda: True)
+    at = sample_with_ai()
+    no_errors(at)
+    assert webapp.escape_markdown(webapp.AI_STATUS_MESSAGES["key_missing"]) in [w.value for w in at.warning]
+    assert ai_buttons(at) == [] and not at.code
+
+
+def test_invalid_settings_are_reported_without_their_values(offline, monkeypatch):
+    monkeypatch.setattr(ai, "sdk_available", lambda: True)
+    monkeypatch.setenv(ai.API_KEY_VARIABLE, FAKE_KEY)
+    monkeypatch.setenv("OPSRESOLVE_AI_TIMEOUT_SECONDS", "secret-looking-value")
+    at = sample_with_ai()
+    no_errors(at)
+    warning = " ".join(w.value for w in at.warning)
+    assert "invalid" in warning and "secret-looking-value" not in everything_shown(at)
+    assert ai_buttons(at) == [] and FAKE_KEY not in everything_shown(at)
+
+
+# ---- ready: preview and explicit send ------------------------------------------------------------------------------
+
+def test_loading_enabling_and_previewing_send_nothing(ready):
+    at = sample_with_ai()
+    no_errors(at)
+    assert ai_buttons(at) == [f"ai_send_{mismatch_id()}"]
+    assert any("after 120 seconds and retried 0 time(s)" in s.value for s in at.caption)
+    at = at.checkbox(key=f"ai_preview_{mismatch_id()}").check().run()
+    no_errors(at)
+    [code] = at.code
+    result = at.session_state["last_run"]["result"]
+    exc = next(e for e in result.exceptions if e.exception_id == mismatch_id())
+    assert code.value == webapp.preview_ai_request(result, exc, webapp.interactive_ai_config()).body
+    assert code.language == "json" and "SUP-001" not in code.value and FAKE_KEY not in code.value
+    assert ready.clients == [] and ready.requests == []  # no client, no request
+
+
+def test_an_accepted_explanation_is_shown_literally_after_an_explicit_send(ready):
+    text = ("Invoice RVX-00981 is from supplier SUPPLIER-2 <script>alert(SUPPLIER-1)</script> **bold** "
+            "[click](javascript:steal) (E1, E2).")
+    ready.text = json.dumps(good_answer(mismatch_id(), text))
+    at = send(sample_with_ai())
+    no_errors(at)
+    assert len(ready.requests) == 1
+    [client] = ready.clients
+    assert (client["timeout"], client["max_retries"]) == (120.0, 0)  # the interactive policy reached the SDK
+    shown_literally = [t.value for t in at.text]
+    expected = text.replace("SUPPLIER-2", "SUP-009").replace("SUPPLIER-1", "SUP-001")
+    assert expected in shown_literally  # pseudonyms restored; markup kept as plain text
+    assert webapp.escape_markdown(webapp.AI_ACCEPTED_LABEL) in [i.value for i in at.info]
+    markdown = " ".join(m.value for group in (at.markdown, at.caption, at.info, at.warning, at.error, at.success)
+                        for m in group)
+    assert "<script>" not in markdown and "**bold**" not in markdown and "](javascript" not in markdown
+    tables = {tuple(d.value.columns): d.value for d in at.dataframe}
+    assert tables[("Fact", "Evidence")].iloc[0].tolist() == ["PO 4500010015 was raised with supplier SUP-001.", "E1"]
+    assert tables[("Hypothesis", "How to check", "Evidence")].iloc[0, 0].startswith("The invoice may have")
+    assert webapp.AI_SUFFICIENCY["partial"] in shown_literally
+    assert "req_secret_id" not in everything_shown(at) and FAKE_KEY not in everything_shown(at)
+    assert not any(m.proto.allow_html and "SUP-" in m.value for m in at.markdown)
+
+
+def test_reruns_show_the_stored_explanation_without_sending_again(ready):
+    at = send(sample_with_ai())
+    at = at.run()
+    at = at.checkbox(key=f"ai_preview_{mismatch_id()}").check().run()
+    no_errors(at)
+    assert len(ready.requests) == 1 and any("SUP-009" in t.value for t in at.text)
+
+
+def test_a_rejected_answer_shows_codes_and_locations_only(ready):
+    bad = good_answer(mismatch_id(), "Northgate Fasteners Ltd billed 2,500 units of SKU-X999 (E1, E2).")
+    bad["invented_field"] = "<img src=x onerror=steal>"
+    ready.text = json.dumps(bad)
+    before = sample_with_ai()
+    shown_before = everything_shown(before)  # the engine's own evidence already names the supplier
+    at = send(before)
+    no_errors(at)
+    assert webapp.escape_markdown(webapp.AI_REJECTED_MESSAGE) in [w.value for w in at.warning]
+    problems = next(d.value for d in at.dataframe if list(d.value.columns) == ["Problem", "Field"])
+    assert ("schema", webapp.UNEXPECTED_LOCATION) in list(problems.itertuples(index=False, name=None))
+    shown = everything_shown(at)
+    for leaked in ("Northgate", "2,500", "SKU-X999", "onerror", "invented_field", "in this evidence"):
+        assert shown.count(leaked) == shown_before.count(leaked), leaked  # nothing of the answer is added
+    assert all("Northgate" not in t.value for t in at.text)
+
+
+@pytest.mark.parametrize("make_error, code", [
+    (lambda: FakeSDK.APITimeoutError("secret raw timeout detail"), "timeout"),
+    (lambda: FakeSDK.APIConnectionError("secret raw connection detail"), "connection"),
+    (lambda: FakeSDK.APIStatusError("secret raw status detail"), "authentication"),  # the fake maps 4xx/5xx alike
+    (lambda: RuntimeError("secret raw unexpected detail"), "provider_error"),
+])
+def test_provider_failures_show_fixed_messages(ready, make_error, code):
+    ready.error = make_error()
+    at = send(sample_with_ai())
+    no_errors(at)
+    assert webapp.escape_markdown(webapp.AI_ERROR_MESSAGES[code]) in [e.value for e in at.error]
+    shown = everything_shown(at)
+    assert "secret raw" not in shown and FAKE_KEY not in shown and "req_secret_id" not in shown
+
+
+@pytest.mark.parametrize("text, stop_reason, status", [("not json", "end_turn", "rejected"),
+                                                       ("", "end_turn", "malformed"),
+                                                       ("{", "max_tokens", "malformed"),
+                                                       ("", "refusal", "refused")])
+def test_malformed_cut_off_and_refused_answers_are_handled(ready, text, stop_reason, status):
+    ready.text, ready.stop_reason = text, stop_reason
+    at = send(sample_with_ai())
+    no_errors(at)
+    if status == "rejected":
+        assert webapp.escape_markdown(webapp.AI_REJECTED_MESSAGE) in [w.value for w in at.warning]
+    else:
+        assert webapp.escape_markdown(webapp.AI_ERROR_MESSAGES[status]) in [e.value for e in at.error]
+    assert "not json" not in everything_shown(at)
+
+
+def test_the_privacy_guard_blocks_preview_and_send(ready, monkeypatch):
+    monkeypatch.setattr(ai, "pseudonymise", lambda pack, known: (pack, {}))  # a failed replacement
+    at = sample_with_ai().checkbox(key=f"ai_preview_{mismatch_id()}").check().run()
+    no_errors(at)
+    message = webapp.escape_markdown(webapp.AI_ERROR_MESSAGES["privacy_guard"])
+    assert message in [w.value for w in at.warning] and not at.code
+    at = send(at)
+    assert message in [e.value for e in at.error]
+    assert ready.requests == [] and "SUP-001" not in " ".join(e.value for e in at.error)
+
+
+def test_explicit_timeout_settings_reach_the_sdk(ready, monkeypatch):
+    monkeypatch.setenv("OPSRESOLVE_AI_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("OPSRESOLVE_AI_MAX_RETRIES", "2")
+    at = send(sample_with_ai())
+    no_errors(at)
+    assert [(c["timeout"], c["max_retries"]) for c in ready.clients] == [(45.0, 2)]
+
+
+# ---- the engine's results and downloads are not changed -----------------------------------------------------------
+
+def test_explaining_changes_no_result_or_download(ready):
+    at = sample_with_ai()
+    result = at.session_state["last_run"]["result"]
+    before = ([e.model_dump() for e in result.exceptions], webapp.exceptions_csv(result),
+              webapp.validation_csv(result), webapp.summary_markdown(result))
+    downloads_before = [d.key for d in at.download_button]
+    at = send(at)
+    no_errors(at)
+    result_after = at.session_state["last_run"]["result"]
+    after = ([e.model_dump() for e in result_after.exceptions], webapp.exceptions_csv(result_after),
+             webapp.validation_csv(result_after), webapp.summary_markdown(result_after))
+    assert after == before and [d.key for d in at.download_button] == downloads_before
+    assert metrics(at)["Exceptions"] == "18"
+
+
+def test_changing_inputs_clears_stored_explanations(ready):
+    at = send(sample_with_ai())
+    assert at.session_state["ai_views"]
+    at = at.number_input(key="cfg_quantity_tolerance").set_value(5.0).run()
+    assert "ai_views" not in at.session_state and not at.tabs
+
+
+def test_app_uses_html_only_for_its_fixed_styling():
+    source = (REPO / "app.py").read_text(encoding="utf-8")
+    assert source.count("unsafe_allow_html=True") == 2  # the page style and the severity badge
+    assert "opsresolve.ai" not in source and "import ai" not in source
+
+
+# ---- C2 follow-up L1: one request per finding at a time ----------------------------------------------------------
+
+import threading  # noqa: E402
+
+
+def request_key(at: AppTest) -> tuple:
+    return (at.session_state["last_run"]["fingerprint"], mismatch_id())
+
+
+def test_one_click_sends_once_and_a_later_click_can_send_again(ready):
+    at = send(sample_with_ai())
+    no_errors(at)
+    assert len(ready.requests) == 1
+    assert at.button(key=f"ai_send_{mismatch_id()}").disabled is False  # enabled again after the answer
+    assert not at.session_state["ai_guard"].is_pending(request_key(at))
+    at = send(at)
+    no_errors(at)
+    assert len(ready.requests) == 2
+
+
+def test_no_second_request_while_one_is_in_progress(ready):
+    at = sample_with_ai()
+    guard, key = at.session_state["ai_guard"], request_key(at)
+    started, release = threading.Event(), threading.Event()
+    worker = threading.Thread(target=guard.run, args=(key, lambda: started.set() or release.wait(10)))
+    worker.start()
+    try:
+        assert started.wait(5)
+        # The button was drawn enabled before the request started: a click that arrives now (the race) ...
+        at = send(at)
+        no_errors(at)
+        assert ready.requests == [] and ready.clients == []  # ... starts nothing
+        assert webapp.escape_markdown(webapp.AI_REQUEST_IN_PROGRESS) in [i.value for i in at.info]
+        assert at.button(key=f"ai_send_{mismatch_id()}").disabled is True  # and the button is now disabled
+    finally:
+        release.set()
+        worker.join(5)
+    at = at.run()
+    assert at.button(key=f"ai_send_{mismatch_id()}").disabled is False
+    at = send(at)
+    assert len(ready.requests) == 1  # after the first one ends, a send works
+
+
+def test_a_send_not_started_is_dropped_when_another_finding_is_shown(ready):
+    at = sample_with_ai()
+    guard, key = at.session_state["ai_guard"], request_key(at)
+    assert guard.mark_pending(key)  # as if the page stopped right after the click
+    other = next(o for o in at.selectbox(key="detail_id").options if not o.startswith(mismatch_id()))
+    at = at.selectbox(key="detail_id").set_value(other).run()
+    assert not guard.is_pending(key)
+    at = at.selectbox(key="detail_id").set_value(
+        next(o for o in at.selectbox(key="detail_id").options if o.startswith(mismatch_id()))).run()
+    no_errors(at)
+    assert ready.requests == []  # never sent later without a new click

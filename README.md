@@ -9,7 +9,7 @@ OpsResolve finds discrepancies between **purchase orders**, **supplier invoices*
 > **Status: deterministic engine with a CLI and a local web app.** All matching and financial
 > calculations are rule-based Python using exact decimal arithmetic; no LLM is used for them. An optional,
 > separately installed module can ask an AI model to explain one exception from its evidence (advisory
-> only, see [AI explanations](#ai-explanations-optional)); it is not yet used by the CLI or the web app.
+> only, see [AI explanations](#ai-explanations-optional)); the web app offers it per finding, off by default.
 > Sample data is synthetic; the tool has not been validated on real customer or supplier data.
 
 ## What it does
@@ -194,10 +194,20 @@ from `OPSRESOLVE_AI_*` variables (see [`.env.example`](.env.example)).
   `https://api.anthropic.com` (`ANTHROPIC_BASE_URL` is ignored).
 - **Failures** (missing configuration, authentication, rate limits, timeouts, network, refusals,
   malformed answers, unexpected provider errors, the privacy check) are returned as results with a code;
-  logs hold no key, prompt, evidence, names or answers. Automated tests never call the API.
+  logs hold no key, prompt, evidence, names or answers. While a request is made, debug and info records of
+  the Anthropic SDK and its HTTP libraries (which can hold the request body and headers) are dropped for that
+  request's thread, even with `ANTHROPIC_LOG=debug`; their warnings and errors, other threads and other code
+  log as configured. Automated tests never call the API.
 
-Not yet built: using this from the web app (with a preview and an explicit send action) and keeping any
-history of explanations.
+**In the web app** (`streamlit run app.py`): turn on *Enable AI explanations* in the sidebar; the page shows
+whether the SDK and `ANTHROPIC_API_KEY` are available. In a finding's detail panel you can show the exact
+request (pseudonymised, as code) and press *Send to Anthropic for an explanation*; nothing is sent on page load,
+on preview or for any other finding. The answer is shown as plain text and tables, labelled as AI-generated
+and advisory; it never changes the findings, amounts or downloads. A rejected answer shows only problem codes
+and field names; failures show fixed messages. In the web app a request is given up after 120 seconds and not
+retried, unless `OPSRESOLVE_AI_TIMEOUT_SECONDS` or `OPSRESOLVE_AI_MAX_RETRIES` is set. The send button is
+disabled while a request for that finding runs, so one finding has at most one request at a time. Explanations
+are kept in memory for the current run only and are not saved.
 
 ## Input format
 
@@ -492,5 +502,5 @@ CLAUDE.md         persistent project instructions for contributors and AI assist
 - FX conversion, tax/freight lines, credit notes, returns and PO amendments; supplier-specific pack sizes
 - Validation of import profiles on real ERP exports, and ready-made profiles for common systems
 - Persistent exception tracking (status, owner, resolution)
-- AI explanations in the web app, with a preview of what is sent and an explicit send action; later,
-  reviewer notes, resolution status and history (AI stays narrative only, never calculations)
+- Reviewer notes, resolution status and a history of AI explanations (AI stays narrative only, never
+  calculations)

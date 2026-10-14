@@ -1029,6 +1029,121 @@ def test_a_broken_sdk_installation_is_not_available(monkeypatch, error):
     assert ai.sdk_available() is False
 
 
+# ---- SDK debug logging never records the request (thread-scoped, any log level) -----------------------------------
+
+SDK_LOGGER_NAMES = ("anthropic", "anthropic._base_client", "httpx2", "httpcore2.http11", "hpack.hpack", "h2.connection")
+
+
+@pytest.fixture
+def sdk_debug_logging(monkeypatch, caplog):
+    """What ANTHROPIC_LOG=debug (and a debug-level httpx2 or HTTP/2 stack) amounts to: SDK loggers at DEBUG."""
+    monkeypatch.setenv("ANTHROPIC_LOG", "debug")
+    for name in SDK_LOGGER_NAMES:
+        sdk_logger = logging.getLogger(name)
+        monkeypatch.setattr(sdk_logger, "level", logging.DEBUG)
+    caplog.set_level(logging.DEBUG)
+    return caplog
+
+
+class LoggingSDK:
+    """A fake SDK that logs what the real one can log at debug level: the request body and the response headers."""
+
+    def __init__(self, text: str, on_create=None):
+        self.text, self.on_create = text, on_create
+        errors = fake_sdk()  # the real SDK's exception hierarchy
+        for name in ("APIError", "APIStatusError", "APIConnectionError", "APITimeoutError", "AuthenticationError",
+                     "PermissionDeniedError", "RateLimitError"):
+            setattr(self, name, getattr(errors, name))
+
+    def Anthropic(self, **settings):  # noqa: N802 (the SDK's name)
+        logging.getLogger("anthropic._base_client").debug("client settings %s", settings)  # holds the key
+        return SimpleNamespace(messages=SimpleNamespace(create=self.create))
+
+    def create(self, **body):
+        logging.getLogger("anthropic._base_client").debug("Request options: %s", json.dumps(body))
+        logging.getLogger("anthropic").info("Retrying request in 0.5 seconds")
+        logging.getLogger("httpx2").info("HTTP Request: POST /v1/messages")
+        logging.getLogger("httpcore2.http11").debug("send_request_body %s", body["messages"][0]["content"])
+        logging.getLogger("hpack.hpack").debug("Decoded header x-api-key: %s", KEY)
+        logging.getLogger("h2.connection").debug("request-id: req_secret_header")
+        logging.getLogger("anthropic").warning("SDK warning kept")
+        if self.on_create is not None:
+            self.on_create()
+        return message(self.text)
+
+
+def test_sdk_debug_logs_of_a_request_are_dropped(supplier_case, sdk_debug_logging):
+    result, exc = supplier_case
+    sdk = LoggingSDK(json.dumps(valid_answer(exc.exception_id)))
+    provider = AnthropicProvider(AIConfig(), environ={API_KEY_VARIABLE: KEY}, sdk=sdk)
+    outcome = explain_exception(result, exc, provider, config=AIConfig())
+    assert outcome.status == "accepted"
+    text = sdk_debug_logging.text
+    for secret in (KEY, "Request options", "Evidence pack", "RVX-00981", "SUPPLIER-1", "req_secret_header",
+                   "client settings", "Retrying request", "HTTP Request"):
+        assert secret not in text, secret
+    assert "SDK warning kept" in text  # warnings and errors still pass
+    assert "status=accepted" in text  # this module's own safe log line is unaffected
+    assert all(logging.getLogger(name).level == logging.DEBUG for name in SDK_LOGGER_NAMES)  # levels unchanged
+
+
+def test_sdk_logging_outside_a_request_is_unchanged(sdk_debug_logging):
+    """Other code using the same loggers, before and after a request, logs as configured."""
+    logging.getLogger("anthropic._base_client").debug("unrelated caller before")
+    with ai._quiet_sdk_logs():
+        logging.getLogger("anthropic._base_client").debug("inside the request")
+    logging.getLogger("anthropic._base_client").debug("unrelated caller after")
+    logging.getLogger("opsresolve.engine.test").debug("other logger inside")
+    text = sdk_debug_logging.text
+    assert "unrelated caller before" in text and "unrelated caller after" in text
+    assert "inside the request" not in text
+
+
+def test_other_threads_log_normally_during_a_request(supplier_case, sdk_debug_logging):
+    import threading
+
+    def other_thread():
+        logging.getLogger("anthropic._base_client").debug("another thread's debug record")
+
+    def during_create():
+        worker = threading.Thread(target=other_thread)
+        worker.start()
+        worker.join()
+
+    result, exc = supplier_case
+    sdk = LoggingSDK(json.dumps(valid_answer(exc.exception_id)), on_create=during_create)
+    provider = AnthropicProvider(AIConfig(), environ={API_KEY_VARIABLE: KEY}, sdk=sdk)
+    explain_exception(result, exc, provider, config=AIConfig())
+    text = sdk_debug_logging.text
+    assert "another thread's debug record" in text and "Request options" not in text
+
+
+def test_the_quiet_scope_ends_after_a_failure(supplier_case, sdk_debug_logging):
+    result, exc = supplier_case
+
+    def failing_create(**body):
+        logging.getLogger("anthropic._base_client").debug("Request options: %s", json.dumps(body))
+        raise FakeConnectionError("secret detail")
+
+    sdk = LoggingSDK("")
+    sdk.create = failing_create
+    provider = AnthropicProvider(AIConfig(), environ={API_KEY_VARIABLE: KEY}, sdk=sdk)
+    outcome = explain_exception(result, exc, provider, config=AIConfig())
+    assert (outcome.status, outcome.error_code) == ("error", "connection")
+    logging.getLogger("anthropic._base_client").debug("after the failed request")
+    text = sdk_debug_logging.text
+    assert "Request options" not in text and "after the failed request" in text
+    assert ai._SDK_LOG_FILTER._threads == {}
+
+
+def test_loggers_created_after_import_are_covered(sdk_debug_logging, monkeypatch):
+    late = logging.getLogger("anthropic.lib.late_module")
+    monkeypatch.setattr(late, "level", logging.DEBUG)
+    with ai._quiet_sdk_logs():
+        late.debug("late logger request body")
+    assert "late logger request body" not in sdk_debug_logging.text
+
+
 # ---- the real SDK (needs the ai extra; CI installs it) -------------------------------------------------------------
 
 REQUIRE_SDK_TESTS = "OPSRESOLVE_REQUIRE_AI_SDK_TESTS"  # set to 1 in CI (.github/workflows/ci.yml)
@@ -1130,6 +1245,29 @@ def test_real_sdk_client_ignores_a_base_url_from_the_environment(monkeypatch):
     assert provider._client.base_url.host == "api.anthropic.com"
 
 
+def test_real_sdk_debug_logging_records_no_request(supplier_case, monkeypatch, caplog):
+    """With the real SDK at debug level (as ANTHROPIC_LOG=debug sets it), nothing of the request is logged."""
+    result, exc = supplier_case
+
+    def handler(request):
+        anthropic, httpx2 = real_sdk()
+        return httpx2.Response(200, json=api_message(json.dumps(valid_answer(exc.exception_id))),
+                               headers={"request-id": "req_real_debug"})
+
+    provider = mocked_provider(handler)
+    for name in ("anthropic", "httpx2", "httpcore2"):
+        monkeypatch.setattr(logging.getLogger(name), "level", logging.DEBUG)
+    caplog.set_level(logging.DEBUG)
+    outcome = explain_exception(result, exc, provider, config=AIConfig())
+    assert (outcome.status, outcome.request_id) == ("accepted", "req_real_debug")
+    for secret in (KEY, "Request options", "Evidence pack", "RVX-00981", "x-api-key"):
+        assert secret not in caplog.text, secret  # in no record at all
+    sdk_records = [r for r in caplog.records if r.name.split(".")[0] in ai._SDK_LOGGER_PREFIXES]
+    assert "req_real_debug" not in "\n".join(r.getMessage() for r in sdk_records)  # the SDK's response headers
+    # The request id is allowed only in this module's own summary line (see ai._log).
+    assert [r.name for r in caplog.records if "req_real_debug" in r.getMessage()] in ([], ["opsresolve.ai"])
+
+
 # ---- the real-SDK tests are mandatory in CI ----------------------------------------------------------------------
 
 def _without_sdk(monkeypatch, missing: str):
@@ -1173,7 +1311,7 @@ def test_ci_requires_the_real_sdk_tests():
 def test_every_real_sdk_test_goes_through_the_guard():
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     real_tests = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_real_sdk")]
-    assert len(real_tests) == 5  # 10 test cases with their parameters: the original 9 and the base-URL test
+    assert len(real_tests) == 6  # 11 test cases with their parameters: the original 9, base URL and debug logging
     for node in real_tests:
         called = {n.func.id for n in ast.walk(node) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         assert called & {"real_sdk", "mocked_provider"}, node.name
