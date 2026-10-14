@@ -481,3 +481,46 @@ def test_encoding_allowlist_is_text_codecs_only():
     for display, codec in ENCODINGS.items():
         assert codecs.lookup(display).name == codec
         assert "é".encode(codec).decode(codec) == "é"
+
+
+# ---- rule 10 rejections at row level (milestone 7, acceptance criterion 4) ----------------------------
+# The parser-level cases above, read through a profile from a real file: each malformed value must reject
+# its row with a row-level issue carrying the original value, the CSV line and the canonical field.
+
+from opsresolve.ingestion import load_purchase_orders  # noqa: E402
+
+PO_COLUMNS = ("po_number;line_number;supplier_id;supplier_name;sku;quantity_ordered;unit_price;currency;"
+              "order_date")
+
+
+@pytest.mark.parametrize("field, value, decimal, thousands, message", [
+    ("unit_price", "€5,00", ",", ".",  # currency symbol
+     "'€5,00' is not a number in the declared format (decimal separator ',', thousands separator '.')"),
+    ("quantity_ordered", "1e3", ".", "",  # exponent
+     "'1e3' is not a number in the declared format (decimal separator '.', thousands separator none)"),
+    ("unit_price", ",5", ",", ".",  # leading decimal separator
+     "',5' is not a number in the declared format (decimal separator ',', thousands separator '.')"),
+    ("quantity_ordered", "5-", ".", "",  # trailing sign
+     "'5-' is not a number in the declared format (decimal separator '.', thousands separator none)"),
+    ("unit_price", "(5)", ".", "",  # bracketed negative
+     "'(5)' is not a number in the declared format (decimal separator '.', thousands separator none)"),
+    ("quantity_ordered", "1,000", ".", "",  # grouping without a declared thousands separator
+     "'1,000' is not a number in the declared format (decimal separator '.', thousands separator none)"),
+], ids=["currency-symbol", "exponent", "leading-decimal-separator", "trailing-sign", "bracketed-negative",
+        "grouping-without-thousands-separator"])
+def test_rule_10_rejections_are_row_level_issues_with_value_and_line(tmp_path, field, value, decimal, thousands,
+                                                                     message):
+    fmt = parse_profile(make(defaults={"delimiter": ";", "decimal_separator": decimal,
+                                       "thousands_separator": thousands})).format_for("purchase_orders")
+    cells = {"quantity_ordered": "5", "unit_price": "2", field: value}
+    path = tmp_path / "po.csv"
+    path.write_text(PO_COLUMNS + "\n"
+                    + "PO-1;1;S1;Supplier;SKU-1;5;2;EUR;2026-03-01\n"  # line 2: valid
+                    + "\n"                                              # line 3: blank
+                    + f"PO-1;2;S1;Supplier;SKU-2;{cells['quantity_ordered']};{cells['unit_price']};EUR;2026-03-01\n",
+                    encoding="utf-8")                                   # line 4: the malformed value
+    result = load_purchase_orders(path, fmt)
+    assert [(r.sku, r.source_row) for r in result.records] == [("SKU-1", 2)]
+    assert [(i.file, i.row, i.field, i.value, i.message) for i in result.issues] == [
+        ("purchase_orders", 4, field, value, f"{message}; row rejected")]
+    assert result.rows_read == 2 and result.rejected_keys == {("PO-1", "SKU-2")}
