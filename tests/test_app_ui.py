@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("streamlit", reason="install the app extra: pip install -e '.[app]'")
+from streamlit import config as streamlit_config  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 import opsresolve.webapp as webapp  # noqa: E402
@@ -20,6 +21,15 @@ INV_CSV = ("invoice_number,invoice_date,supplier_id,po_number,sku,quantity_invoi
            "I1,2026-08-10,S1,P1,SKU-1,10,5.00,USD\n")
 GRN_CSV = ("grn_number,received_date,supplier_id,po_number,sku,quantity_received\n"
            "G1,2026-08-08,S1,P1,SKU-1,10\n")
+
+
+@pytest.fixture(autouse=True)
+def bound_to_localhost():
+    """As launched with `streamlit run app.py --server.address localhost`; restored after each test."""
+    before = streamlit_config.get_option("server.address")
+    streamlit_config.set_option("server.address", "localhost")
+    yield
+    streamlit_config.set_option("server.address", before)
 
 
 def start() -> AppTest:
@@ -53,11 +63,46 @@ def no_errors(at: AppTest) -> None:
 
 # ---- configuration -------------------------------------------------------------
 
-def test_streamlit_config_is_local_only_without_telemetry():
+def test_the_single_streamlit_config_is_shared_and_leaves_binding_to_the_launch_command():
     text = (REPO / ".streamlit" / "config.toml").read_text(encoding="utf-8")
-    assert re.search(r'^address = "localhost"$', text, re.M)
-    assert re.search(r"^gatherUsageStats = false$", text, re.M)
-    assert re.search(r"^maxUploadSize = 20$", text, re.M)
+    settings = dict(re.findall(r"^(\w+) = (.+)$", text, re.M))
+    assert "address" not in settings and "port" not in settings and "serverAddress" not in settings
+    assert settings["gatherUsageStats"] == "false"
+    assert settings["enableXsrfProtection"] == "true"
+    assert settings["maxUploadSize"] == "20"
+    # Streamlit Community Cloud reads only the repository root's config file, so there is no other one.
+    configs = [p.relative_to(REPO).as_posix() for p in REPO.rglob("config.toml")
+               if ".venv" not in p.parts and "venv" not in p.parts]
+    assert configs == [".streamlit/config.toml"]
+
+
+@pytest.mark.parametrize("address", ["localhost", "127.0.0.1", "::1"])
+def test_local_app_runs_when_bound_to_this_computer(address):
+    streamlit_config.set_option("server.address", address)
+    at = start()
+    no_errors(at)
+    assert not at.error and at.get("file_uploader")
+
+
+@pytest.mark.parametrize("address", [None, "", "0.0.0.0", "::", "192.168.1.20"])
+def test_local_app_refuses_to_run_unless_bound_to_this_computer(address):
+    streamlit_config.set_option("server.address", address)
+    at = start()
+    no_errors(at)
+    assert "runs only when the server listens on this computer alone" in at.error[0].value
+    assert at.code[0].value == "streamlit run app.py --server.address localhost"
+    assert at.get("file_uploader") == [] and not at.toggle and not at.button and not at.sidebar.number_input
+
+
+LAUNCH = re.compile(r"streamlit run (app\.py|demo/streamlit_app\.py)\b[^\n`]*")
+
+
+@pytest.mark.parametrize("document", ["README.md", "CLAUDE.md", "app.py", "demo/streamlit_app.py",
+                                      ".streamlit/config.toml"])
+def test_documented_local_launch_commands_bind_to_localhost(document):
+    commands = [m.group(0) for m in LAUNCH.finditer((REPO / document).read_text(encoding="utf-8"))]
+    assert commands, document
+    assert all("--server.address localhost" in command for command in commands), commands
 
 
 # ---- initial state ---------------------------------------------------------------
@@ -304,6 +349,16 @@ def test_same_contents_under_new_names_keep_results_and_show_new_names():
     assert metrics(at)["Exceptions"] == "0"
     files_table = next(d.value for d in at.dataframe if "Uploaded as" in d.value.columns)
     assert list(files_table["Uploaded as"]) == ["po_v2.csv", "inv_v2.csv", "goods_received.csv"]
+
+
+def test_long_validation_problems_wrap_instead_of_being_cut_off():
+    source = (REPO / "app.py").read_text(encoding="utf-8")
+    # Streamlit's table wraps cell text only in rows taller than 4rem (64 px).
+    assert int(re.search(r"^VALIDATION_ROW_HEIGHT = (\d+)", source, re.M).group(1)) > 64
+    assert "column_config=VALIDATION_COLUMNS, row_height=VALIDATION_ROW_HEIGHT" in source
+    tab = run(use_sample(start())).tabs[1]  # the validation tab still lists every problem in full
+    problems = tab.dataframe[0].value["Problem"].tolist()
+    assert any("month value is outside expected range of 1-12; row rejected" in p for p in problems)
 
 
 def test_validation_view_shows_the_current_file_name():

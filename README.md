@@ -2,17 +2,90 @@
 
 [![CI](https://github.com/garvit-mittal04/opsresolve-ai/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/garvit-mittal04/opsresolve-ai/actions/workflows/ci.yml)
 
-AI-powered operations exception investigator for manufacturing and distribution businesses.
-OpsResolve finds discrepancies between **purchase orders**, **supplier invoices** and
-**goods-received records**, quantifies them, shows the evidence and recommends a corrective action.
+Operations exception investigator for manufacturing and distribution businesses. OpsResolve finds
+discrepancies between **purchase orders**, **supplier invoices** and **goods-received records**, quantifies
+them exactly, shows the evidence and recommends a next step. Optional, advisory AI explanations sit on top of
+the deterministic engine; they never calculate anything.
 
-> **Status: deterministic engine with a CLI and a local web app.** All matching and financial
-> calculations are rule-based Python using exact decimal arithmetic; no LLM is used for them. An optional,
-> separately installed module can ask an AI model to explain one exception from its evidence (advisory
-> only, see [AI explanations](#ai-explanations-optional)); the web app offers it per finding, off by default.
-> Deterministic [investigation checks](#investigation-checks) list candidate explanations for a finding and
-> test each against the loaded records; they are never confirmed causes.
-> Sample data is synthetic; the tool has not been validated on real customer or supplier data.
+> **Status: portfolio project.** A deterministic Python engine with a CLI, a local web app and a
+> [public demo mode](#public-demo-mode). All matching and financial calculations are rule-based Python using
+> exact decimal arithmetic; no LLM is used for them. An optional, separately installed module can ask an AI
+> model to explain one exception from its evidence (advisory only, see
+> [AI explanations](#ai-explanations-optional)); the local web app offers it per finding, off by default, and
+> the public demo never offers it. Deterministic [investigation checks](#investigation-checks) list candidate
+> explanations for a finding and test each against the loaded records; they are never confirmed causes.
+> **All data is synthetic and all suppliers are fictional; the tool has not been validated on real customer
+> or supplier data and is not approved for real financial transactions.**
+
+**Public demo:** not deployed yet. The demo runs only the bundled synthetic sample, with uploads and AI
+turned off; see [Deploying the public demo](#deploying-the-public-demo). Its link will be added here once it
+has been deployed and checked at its public address.
+
+## Screenshots
+
+Taken from the public-demo mode running locally
+(`streamlit run demo/streamlit_app.py --server.address localhost`) on the bundled synthetic sample, in a
+1400-pixel-wide browser window.
+
+| Run summary | One finding with its investigation checks | Rejected input rows |
+|---|---|---|
+| ![Run summary: 62 rows read, 3 validation issues, 18 exceptions by severity and type](docs/images/demo-overview.png) | ![Detail of a missing-goods-receipt finding: evidence rows and two investigation checks](docs/images/demo-finding-detail.png) | ![Validation issues table with file, line, field, value and the full problem text](docs/images/demo-validation-issues.png) |
+
+## Highlights
+
+- **Exact, explainable arithmetic.** Every quantity and amount is a `Decimal`, rounded half-up to cents only
+  at the edge; every finding lists the source rows (file and line) it was computed from.
+- **Strict input handling.** Invalid rows are rejected and reported by file, line and field, never repaired or
+  guessed. Other CSV layouts are read only through an explicitly selected [import profile](#import-profiles).
+- **Nine exception types** (quantity, price, currency, supplier and unit-of-measure mismatches; missing PO,
+  goods receipt or invoice; possible duplicate invoices) with severity, amount impact and a recommended
+  next step that never asserts a cause.
+- **Investigation checks** that test candidate explanations from a fixed catalogue against the records and
+  label each "consistent with the data — not confirmed", "contradicted by the data" or "can't be checked".
+- **Measured against a labelled synthetic benchmark** (36 scenarios, hand-written answer key): precision
+  1.000, recall 0.973, F1 0.986, with the one miss (S36) documented as a known limitation.
+- **Safe exports:** web downloads and the CLI's `investigations.csv` neutralise spreadsheet formulas.
+- **1,152 automated tests** (1,141 run without the optional AI SDK), including Streamlit UI tests and the
+  public-demo restrictions; see [Test evidence](#test-evidence).
+
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    CSV["CSV files<br/>(PO, invoices, receipts,<br/>optional unit conversions)"] --> ING["ingestion<br/>validate rows"]
+    PROF["import profile<br/>(optional, explicit)"] -.-> ING
+    ING --> MAT["matching<br/>by PO and SKU"] --> UOM["uom<br/>exact unit conversion"] --> DET["detection<br/>rules, amounts, severity"]
+    DET --> REP["reporting<br/>Markdown and CSV"]
+    DET --> INV["investigation<br/>candidate explanations<br/>(deterministic)"]
+    DET --> AI["ai + explanation<br/>optional, advisory,<br/>validated answers"]
+    REP --> CLI["CLI"]
+    REP --> WEB["web app / public demo"]
+    INV --> CLI
+    INV --> WEB
+    AI -. local web app only .-> WEB
+```
+
+Business rules live only in the pure engine modules; the CLI, the web app and the public demo are thin layers
+over the same pipeline, so the same files and settings give the same findings everywhere. See
+[`docs/architecture.md`](docs/architecture.md) for the module boundaries and the full rule table.
+
+## Limitations at a glance
+
+- **Synthetic data only.** No real supplier data has been processed and no customer has validated the
+  output. The benchmark was written by the same team as the rules; it is not evidence of real-world accuracy.
+- **Known miss (S36):** a duplicate bill re-sent under a new number on a half-delivered PO is not flagged,
+  because its records are indistinguishable from a legitimate second invoice (S27).
+- **No currency conversion,** and no rules for tax, freight, discounts, credit notes, returns, PO amendments
+  or invoice header totals.
+- **Placeholder business thresholds:** the default tolerances (zero) and severity thresholds (1,000.00 and
+  100.00) are not tuned to any business.
+- **Live AI behaviour is untested:** no test calls the real API and the quality of real model answers has not
+  been evaluated. The public demo has no AI at all.
+- **Single user, no persistence:** no login, sharing, saved runs or exception-status tracking. The public demo
+  is a read-only showcase of the synthetic sample, not a hosted service for your data.
+
+More detail: [Evaluation](#evaluation), [Web app limitations](#web-app-limitations) and
+[`docs/validation-plan.md`](docs/validation-plan.md).
 
 ## What it does
 
@@ -93,9 +166,10 @@ files are then complete and `investigations.csv` is not written). Exit status 3 
 ## Local web app
 
 A single-page Streamlit app for running a reconciliation from your browser, reviewing the findings and
-exporting them. It runs **only on your computer**: it listens on `localhost`, sends no usage statistics,
-and uses no database, cloud service or AI model. It calls the same pipeline as the CLI, so results are
-identical for the same files and settings.
+exporting them. It runs **only on your computer**: started as below it listens on `localhost` only, and it
+refuses to run (showing only the launch command) when the server is bound to any other address. It sends no
+usage statistics and uses no database, cloud service or AI model unless you turn on the optional AI
+explanations. It calls the same pipeline as the CLI, so results are identical for the same files and settings.
 
 ### Install and launch (macOS)
 
@@ -104,12 +178,16 @@ cd opsresolve-ai
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[app]"            # adds Streamlit; use ".[dev,app]" to also run the tests
-streamlit run app.py               # or: python -m streamlit run app.py
+streamlit run app.py --server.address localhost
+# or: python -m streamlit run app.py --server.address localhost
 ```
 
-Streamlit reads `.streamlit/config.toml` from next to `app.py` (checked with Streamlit 1.50 and 1.65), so its
-localhost-only and no-telemetry settings apply wherever you launch from; command-line flags or `STREAMLIT_*`
-environment variables that you set yourself still override them.
+Launch from the repository root. `--server.address localhost` keeps the server on this computer: the
+repository's single `.streamlit/config.toml` is shared with the hosted public demo, so it sets no server
+address (see [Public demo mode](#public-demo-mode)). Without the option, or with any address other than
+`localhost`, `127.0.0.1` or `::1`, the app shows only an error with the command above and offers no upload.
+The config file still turns off usage statistics, keeps cross-site request forgery protection on and limits
+uploads to 20 MB; command-line flags or `STREAMLIT_*` environment variables that you set yourself override it.
 It opens `http://localhost:8501` in your browser; stop it with `Ctrl+C` in the terminal.
 
 ### Performing a reconciliation
@@ -166,11 +244,102 @@ inclusive, and a larger profile is rejected with the problem listed in the app).
 - Single user, local only: no login, sharing, saved runs or status tracking of exceptions.
 - Files must use the column names above unless an import profile maps them; there is no automatic
   detection of layouts.
-- Verified versions (on Linux): the full test suite passes with Streamlit 1.65 on Python 3.10, 3.13 and 3.14.
+- Verified versions (on Linux): the full test suite passes with Streamlit 1.65 on Python 3.10, 3.13 and 3.14,
+  and with Streamlit 1.66.0 on Python 3.12 and 3.13 (the versions pinned in `requirements.txt` for the public
+  demo). CI installs the newest Streamlit release on Python 3.10 and 3.14.
   With Streamlit 1.50, the declared minimum, the app was only smoke-tested in a browser (upload, run,
   CSV download) on Python 3.13 during Milestone 6, when 17 UI tests failed there because Streamlit 1.50's
   test tool (`AppTest`) has a smaller API (no file-upload or download-button support, and dropdowns can
   only be set by value). The import-profile UI has not been tested with Streamlit 1.50. CI runs on Linux only.
+
+## Public demo mode
+
+`demo/streamlit_app.py` runs the same page as `app.py` in a restricted mode meant for a public portfolio
+deployment:
+
+- **Only the bundled synthetic sample.** Visitors run `data/sample/` (read only) and explore the results,
+  filters, finding details, investigation checks and downloads. There is no data-source choice.
+- **No uploads.** No upload widget of any kind is created (data files, import profile, templates).
+- **No AI.** The AI section is replaced by a fixed note. AI readiness is never checked, so a key set in the
+  environment or in hosting secrets is never read, and no request can be made.
+- **A clear notice** that the data is synthetic, suppliers are fictional, and the demo is not approved for
+  real supplier data, payment decisions or any real financial transaction.
+- **One session per visitor.** Results, settings and filters live in Streamlit's per-browser-session state;
+  the app keeps no module-level or cached state and writes nothing to disk except the per-run temporary
+  folder, which is deleted when the run ends. Nothing is shared between visitors.
+- **No error details** (tracebacks or file paths) are shown to visitors: demo mode sets Streamlit's
+  `client.showErrorDetails` to `none` from the code, one of the options Streamlit allows a script to set.
+
+Everything else is the local app unchanged: `streamlit run app.py --server.address localhost` still offers
+uploads, import profiles and optional AI explanations.
+
+Run the demo locally, bound to this computer:
+
+```bash
+pip install -e ".[app]"
+streamlit run demo/streamlit_app.py --server.address localhost
+```
+
+**Configuration strategy.** Streamlit Community Cloud reads one `.streamlit/config.toml`, at the repository root,
+whatever the entrypoint, and runs apps from the root. So the repository has exactly that one file, and it
+holds only settings that are right for both uses (no usage statistics, XSRF protection, the 20 MB upload limit,
+the theme). It does not set the server address: the hosting platform binds the demo as it needs, and every
+local launch command binds to localhost explicitly. Settings that differ between the demo and the local app
+are made in code by `app.main(public_demo=True)`, not by a second config file.
+
+## Deploying the public demo
+
+The demo is designed for [Streamlit Community Cloud](https://docs.streamlit.io/deploy/streamlit-community-cloud).
+It needs no database, authentication, secrets or API key. **It has not been deployed yet**; the steps below
+describe the intended configuration and the checks to run once it is live.
+
+1. Push the repository (including `requirements.txt`, `demo/` and `data/sample/`) to GitHub.
+2. In Community Cloud choose **Create app**, select the repository and branch, and set the **main file path**
+   to `demo/streamlit_app.py`. Do not deploy `app.py`: it accepts uploads.
+3. Under **Advanced settings**, choose **Python 3.13** (the version the full suite was run with for these pins;
+   3.12 also passes) and leave **Secrets empty**. The demo never reads `ANTHROPIC_API_KEY`, but there is no
+   reason to store one there.
+4. Deploy. Community Cloud installs `requirements.txt` from the repository root, the one dependency file it
+   uses here: `-e .[app]` installs the project and its `app` extra as declared in `pyproject.toml` (editable,
+   because the bundled sample is found next to the source tree, which a regular install would not include),
+   and the pins fix Streamlit, pandas and pydantic to the tested versions within `pyproject.toml`'s ranges
+   (tests check this). Because `requirements.txt` comes before `pyproject.toml` in Community Cloud's order,
+   `pyproject.toml` is read only as the project's metadata, not as a separate dependency file; the demo
+   folder has no dependency file of its own. Do not delete `requirements.txt`: Community Cloud would then
+   treat `pyproject.toml` as a Poetry project, which this setuptools project is not.
+5. Check the live app at its public address before sharing it:
+   - the synthetic-data notice is shown and the sidebar says AI explanations are not available;
+   - there is no upload control anywhere on the page;
+   - **Run reconciliation** shows 62 rows read, 3 validation issues and 18 exceptions (8 high, 7 medium, 3 low);
+   - a finding's detail panel shows its investigation checks and no AI section;
+   - the three downloads work, and in the exceptions CSV the amount `-50.00` is a plain number;
+   - opening the app in a second browser (or a private window) shows no results until you run it there.
+6. Add the public link to the top of this README.
+
+What the platform documentation says, and how this repository follows it:
+
+- Community Cloud runs every app from the repository root and recognises one `.streamlit/config.toml`, at the
+  root, even for an entrypoint in a subdirectory
+  ([file organization](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/file-organization)).
+  The repository has only that file, and it sets no server address.
+- It uses the first dependency file it finds, in the entrypoint's folder and then the root, in the order
+  `uv.lock`, `requirements.txt`, `pyproject.toml` (Poetry), and advises using only one
+  ([app dependencies](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/app-dependencies)).
+  `requirements.txt` at the root is the one used; tests check that no other dependency file competes with it.
+- The Python version is chosen when deploying and cannot be changed later without redeploying
+  ([upgrade Python](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app/upgrade-python)).
+- Secrets are entered in the app's settings, never committed
+  ([secrets management](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management));
+  the demo needs none.
+
+Still to confirm on the first deployment, because the documentation does not say: how the platform binds the
+server (the demo runs with any address, so this should not matter), and that installing an editable project
+with an extra (`-e .[app]`) from `requirements.txt` works there as it does with uv and pip locally.
+
+**Security limitations of the public demo.** It is a read-only showcase, not a hardened service: it has no
+login, rate limiting or audit log, and it relies on the hosting platform for HTTPS, isolation between apps and
+availability (Community Cloud apps go to sleep when unused). Anyone with the link can use it. It must never
+be changed to accept uploads or enable AI without a separate security review.
 
 ## Configuration
 
@@ -214,15 +383,15 @@ from `OPSRESOLVE_AI_*` variables (see [`.env.example`](.env.example)).
   request's thread, even with `ANTHROPIC_LOG=debug`; their warnings and errors, other threads and other code
   log as configured. Automated tests never call the API.
 
-**In the web app** (`streamlit run app.py`): turn on *Enable AI explanations* in the sidebar; the page shows
-whether the SDK and `ANTHROPIC_API_KEY` are available. In a finding's detail panel you can show the exact
-request (pseudonymised, as code) and press *Send to Anthropic for an explanation*; nothing is sent on page load,
-on preview or for any other finding. The answer is shown as plain text and tables, labelled as AI-generated
-and advisory; it never changes the findings, amounts or downloads. A rejected answer shows only problem codes
-and field names; failures show fixed messages. In the web app a request is given up after 120 seconds and not
-retried, unless `OPSRESOLVE_AI_TIMEOUT_SECONDS` or `OPSRESOLVE_AI_MAX_RETRIES` is set. The send button is
-disabled while a request for that finding runs, so one finding has at most one request at a time. Explanations
-are kept in memory for the current run only and are not saved.
+**In the web app** (`streamlit run app.py --server.address localhost`): turn on *Enable AI explanations* in the
+sidebar; the page shows whether the SDK and `ANTHROPIC_API_KEY` are available. In a finding's detail panel you
+can show the exact request (pseudonymised, as code) and press *Send to Anthropic for an explanation*; nothing is
+sent on page load, on preview or for any other finding. The answer is shown as plain text and tables, labelled
+as AI-generated and advisory; it never changes the findings, amounts or downloads. A rejected answer shows only
+problem codes and field names; failures show fixed messages. In the web app a request is given up after 120
+seconds and not retried, unless `OPSRESOLVE_AI_TIMEOUT_SECONDS` or `OPSRESOLVE_AI_MAX_RETRIES` is set. The send
+button is disabled while a request for that finding runs, so one finding has at most one request at a time.
+Explanations are kept in memory for the current run only and are not saved.
 
 ## Investigation checks
 
@@ -465,6 +634,32 @@ Install with `.[dev,app]` (see [Setup](#setup)) so the Streamlit UI tests run in
 GitHub Actions runs the same suite on every push and pull request to `main`, on Python 3.10 and 3.14,
 then prints the evaluation report to the run summary (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
+### Test evidence
+
+Recorded for the portfolio-demo release (Linux; the 11 skipped tests need the optional Anthropic SDK,
+which CI installs and requires):
+
+| Environment | Result |
+|---|---|
+| Python 3.13, Streamlit 1.65.0, editable install of `.[dev,app]` | 1,141 passed, 11 skipped |
+| Python 3.13, Streamlit 1.66.0, editable install of `.[dev,app]` | 1,141 passed, 11 skipped |
+| Python 3.13, Streamlit 1.66.0, fresh install of `requirements.txt` with uv (Community Cloud's first choice) | 1,141 passed, 11 skipped |
+| Python 3.12, Streamlit 1.66.0, fresh install of `requirements.txt` with uv | 1,141 passed, 11 skipped |
+
+`requirements.txt` also installs with pip (Community Cloud's fallback) on Python 3.13. Launching each
+entrypoint locally confirmed the configuration strategy: `app.py` and `demo/streamlit_app.py` with
+`--server.address localhost` listen on `127.0.0.1` only; without it both listen on all interfaces, the demo
+works (as on a hosting platform) and the local app shows only the error with the launch command, with no
+upload control.
+
+`tests/test_public_demo.py` covers the demo's restrictions: only the bundled sample, no upload widgets before
+or after a run, no AI section or AI call even with a key configured, separate state per browser session,
+formula-protected downloads, unchanged local-app features, the hosting configuration, and a scan of the
+repository for secret files and credential patterns. The CLI's reconciliation results on `data/sample`,
+`data/evaluation` and the investigation fixtures were compared before and after this release: every column
+of every CSV is identical except the reworded rejected-row notes, and the evaluation report is byte-identical.
+The public deployment itself has not been tested yet.
+
 ## Evaluation
 
 OpsResolve is measured against a labelled synthetic dataset in [`data/evaluation/`](data/evaluation/):
@@ -560,12 +755,16 @@ src/opsresolve/   models, config, profiles (import profiles), ingestion, matchin
                   explanation (evidence packs and answer validation), ai (optional AI provider),
                   investigation (deterministic investigation checks)
 app.py            Streamlit web app (layout only; see "Local web app")
-.streamlit/       local-only Streamlit settings (localhost, no telemetry)
+demo/             public-demo entrypoint (streamlit_app.py; deploy this file, never app.py)
+requirements.txt  the hosted demo's one dependency file (editable install of pyproject.toml's app extra + pins)
+.streamlit/       the repository's single Streamlit config, shared by local runs and the hosted demo
+                  (no telemetry, XSRF on; no server address: local commands bind to localhost)
 data/sample/      synthetic CSVs + README listing every seeded scenario and expected result
 data/evaluation/  labelled evaluation dataset: inputs, scenarios.csv, expected_exceptions.csv
 tests/            unit and end-to-end tests; tests/fixtures/profiles/ holds import-profile fixtures,
                   tests/fixtures/investigations/ the investigation-check fixtures
-docs/             architecture and validation plan; docs/examples/ holds the example import profile
+docs/             architecture and validation plan; docs/examples/ holds the example import profile,
+                  docs/images/ the README screenshots
 CLAUDE.md         persistent project instructions for contributors and AI assistants
 ```
 

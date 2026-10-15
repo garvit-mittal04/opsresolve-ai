@@ -13,7 +13,8 @@ A deterministic three-way-match exception investigator:
    possible duplicate invoices.
 6. Calculate discrepancies exactly.
 7. Produce a readable exception report (Markdown + CSV + console summary) from the CLI or the local
-   Streamlit web app, and score the engine against a labelled synthetic dataset (`evaluation.py`).
+   Streamlit web app (also available as a restricted public demo on the bundled synthetic sample), and score the
+   engine against a labelled synthetic dataset (`evaluation.py`).
 8. Optionally (Milestone 8):
    - explain one exception with an AI model (Stages A–C; offered per finding in the web app, off by default);
    - check candidate explanations for each exception deterministically against the loaded records (Stage D;
@@ -254,7 +255,32 @@ browser ──► app.py (layout, widgets) ──► webapp.py (plain Python) �
 - Text from uploaded files is shown in tables or Markdown-escaped, never rendered as Markdown/HTML.
 - Each finding's detail panel shows its investigation checks (Stage D2): `webapp.cached_investigations` computes
   them for every finding once per run and keeps them with the stored run (see Investigation checks below).
-- `.streamlit/config.toml` binds the server to `localhost`, disables usage statistics and limits uploads.
+- `.streamlit/config.toml` is the repository's only Streamlit config, shared with the hosted public demo
+  (Streamlit Community Cloud reads only the root file): it disables usage statistics, keeps XSRF protection on
+  and limits uploads, but sets no server address. Local launches bind with `--server.address localhost`, and in
+  local mode `app.main()` shows only an error with that command unless the address is in `LOCAL_ADDRESSES`
+  (`localhost`, `127.0.0.1`, `::1`), so the upload page never runs on a public interface.
+- Text in the validation table wraps (rows taller than Streamlit's 4rem wrapping threshold, with column widths
+  that fit a 1280 px window), so long problem messages are not cut off.
+
+### Public demo mode
+
+`demo/streamlit_app.py` imports `app.py` and calls `app.main(public_demo=True)` (running `app.py` itself calls
+`main()`). The flag changes four things and nothing in the engine or `webapp.py`:
+
+- `collect_inputs` returns `webapp.sample_uploads()` without creating any upload widget (no data-source choice,
+  templates or import profile) and shows an error if the bundled sample is missing from the installation;
+- `ai_sidebar` returns `None` without creating the toggle or calling `webapp.ai_status`, so the detail panel has
+  no AI section and the key's presence is never even checked;
+- the page shows a fixed notice that the data is synthetic and the demo is not approved for real transactions;
+- `st.set_option("client.showErrorDetails", "none")` hides error details from visitors (a scriptable option, so
+  no second config file is needed), and the local-address guard does not apply.
+
+Each browser session keeps its run in `st.session_state`; the app has no module-level, cached or on-disk state
+apart from the per-run temporary folder. The demo has no config file of its own: the hosting platform binds the
+server and reads the root `.streamlit/config.toml`. `requirements.txt` (`-e .[app]`, the project and its `app`
+extra as an editable install, plus Streamlit, pandas and pydantic pinned inside `pyproject.toml`'s ranges) is
+the only dependency file a hosted deployment uses; tests are in `tests/test_public_demo.py`.
 
 ## Configuration
 

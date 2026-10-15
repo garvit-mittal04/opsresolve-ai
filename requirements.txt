@@ -1,0 +1,11 @@
+# The one dependency file for the hosted public demo (demo/streamlit_app.py). Streamlit Community Cloud uses the
+# first dependency file it finds (the entrypoint's folder first, then the repository root; uv.lock, then
+# requirements.txt, then pyproject.toml), so it installs this file and does not process pyproject.toml as a
+# dependency file. pyproject.toml remains the single definition of the project's dependencies: the first line
+# installs the project and its "app" extra from it, and the pins below only fix the versions within its ranges
+# to the ones the full test suite was run with (Python 3.12 and 3.13); tests check that they stay inside those
+# ranges. Editable, because the bundled sample data is found next to the source tree. No AI extra and no key.
+-e .[app]
+streamlit==1.66.0
+pandas==3.0.6
+pydantic==2.14.1

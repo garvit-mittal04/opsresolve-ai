@@ -35,7 +35,7 @@ if TYPE_CHECKING:  # uom imports this module, so only import its types for annot
 ZERO = Decimal("0")
 
 _REJECTED_NOTE = (
-    "A {file} row for PO {po} / SKU {sku} was rejected during input validation. "
+    "A row of the {file} file for PO {po} / SKU {sku} was rejected during input validation. "
     "This exception may be a consequence of that data error; review the validation issues first."
 )
 

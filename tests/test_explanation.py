@@ -183,15 +183,15 @@ def test_identifying_values_list_supplier_ids_and_document_numbers(sample):
 def test_rejected_input_rows_are_listed_as_limitations(sample, exc_type, po_number, label, sku):
     pack = build_evidence_pack(sample, find(sample, exc_type, po_number))
     assert len(pack.limitations) == 1
-    assert pack.limitations[0].startswith(f"A {label} row for PO {po_number} / SKU {sku or ''}")
+    assert pack.limitations[0].startswith(f"A row of the {label} file for PO {po_number} / SKU {sku or ''}")
     assert "rejected during input validation" in pack.limitations[0]
 
 
 def test_missing_purchase_order_rows_rejected_from_the_po_file_are_limitations(sample):
     for exc in [e for e in sample.exceptions if e.po_number == "4500010012"]:  # purchase_orders line 16
         assert build_evidence_pack(sample, exc).limitations == (
-            "A purchase_orders row for PO 4500010012 / SKU BRG-6001 was rejected during input validation, "
-            "so it is not part of this evidence.",)
+            "A row of the purchase_orders file for PO 4500010012 / SKU BRG-6001 was rejected during input "
+            "validation, so it is not part of this evidence.",)
 
 
 # ---- missing or unavailable source records ------------------------------------------------------------
@@ -670,8 +670,8 @@ def test_a_rejected_row_with_a_blank_sku_is_a_limitation(tmp_path):
     assert [(i.file, i.row, i.field) for i in result.dataset.issues if i.row == 6] == [("invoices", 6, "sku")]
     exc = find(result, T.MISSING_INVOICE, "4500010003")  # 380 received, the invoice row is gone
     pack = build_evidence_pack(result, exc)
-    assert pack.limitations == ("Rejected invoices rows without a usable PO number or SKU (invoices line 6) could "
-                                "not be linked to a PO line and may belong to this one.",)
+    assert pack.limitations == ("Rejected rows of the invoices file without a usable PO number or SKU (invoices "
+                                "line 6) could not be linked to a PO line and may belong to this one.",)
     candidate = {"exception_id": exc.exception_id, "direction": pack.exception.direction,
                  "explanation": "GRN 5000050004 records 380 units.",
                  "confirmed_facts": [], "possible_causes": [], "investigation_steps": [],
