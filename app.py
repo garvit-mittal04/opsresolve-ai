@@ -3,7 +3,7 @@
 Run from the repository root:
 
     pip install -e ".[app]"
-    streamlit run app.py
+    streamlit run app.py --server.address localhost
 
 This file only lays out the page. Reconciliation is done by the existing
 pipeline through ``opsresolve.webapp``; no business rules live here. Text that
@@ -18,6 +18,14 @@ Optional AI explanations are off until the user turns them on, and a request is
 sent only when the user presses the send button for one finding. Text written by
 the model is shown literally (``st.text`` and table cells), the request preview
 with ``st.code``, and failures with the fixed messages from ``opsresolve.webapp``.
+
+Run it bound to this computer (``--server.address localhost``): the local app
+accepts uploads, so it shows only an error with that command unless the server
+address is localhost, 127.0.0.1 or ::1.
+
+The public portfolio demo (``demo/streamlit_app.py``) runs the same page with
+``main(public_demo=True)``: only the bundled synthetic sample, no upload widgets,
+no AI section at all (AI readiness is never even checked) and no error details.
 """
 
 from __future__ import annotations
@@ -34,25 +42,44 @@ from opsresolve.detection import fmt_money, fmt_qty
 from opsresolve.models import ExceptionType, Severity
 from opsresolve.webapp import INPUTS, MissingInputError, Upload, escape_markdown as esc
 
-st.set_page_config(page_title="OpsResolve", layout="wide")
-
-# Fixed styling only; no uploaded content is ever placed inside this HTML.
-st.markdown(
-    """
-    <style>
-      .block-container {padding-top: 2rem; max-width: 1200px;}
-      .ops-badge {display:inline-block; padding:0.1rem 0.55rem; border-radius:0.25rem;
-                  font-size:0.78rem; font-weight:600; letter-spacing:0.03em; border:1px solid;}
-      .ops-HIGH {color:#8a1c1c; background:#fbeaea; border-color:#e6b8b8;}
-      .ops-MEDIUM {color:#7a4b00; background:#fdf3e1; border-color:#ecd3a3;}
-      .ops-LOW {color:#3b4a5a; background:#eef1f4; border-color:#cdd5de;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 SEVERITY_ORDER = [Severity.HIGH, Severity.MEDIUM, Severity.LOW]
 EXAMPLE_PROFILE = Path(__file__).resolve().parent / "docs" / "examples" / "import-profile-example.json"
+# Widths that fit a 1280 px window next to the sidebar; wider windows stretch them. Long problems wrap instead of
+# being cut off: Streamlit wraps cell text only in rows taller than 4rem (64 px), and 80 px fits three lines.
+VALIDATION_COLUMNS = {
+    "File": st.column_config.TextColumn(width=170),
+    "Line": st.column_config.NumberColumn(width=55),
+    "Field": st.column_config.TextColumn(width=130),
+    "Value": st.column_config.TextColumn(width=100),
+    "Problem": st.column_config.TextColumn(width=330),
+}
+VALIDATION_ROW_HEIGHT = 80
+PUBLIC_DEMO_NOTICE = (
+    "**Public portfolio demo: synthetic data only.** Every record is synthetic and every supplier is fictional. "
+    "File uploads and AI explanations are turned off. This demo is not approved for real supplier data, payment "
+    "decisions or any real financial transaction.")
+# The repository has one .streamlit/config.toml, shared with hosted deployments, so it does not bind the server to
+# localhost. The local app accepts uploads and therefore runs only when started bound to this computer.
+LOCAL_ADDRESSES = ("localhost", "127.0.0.1", "::1")
+LOCAL_LAUNCH_COMMAND = "streamlit run app.py --server.address localhost"
+
+
+def page_setup() -> None:
+    st.set_page_config(page_title="OpsResolve", layout="wide")
+    # Fixed styling only; no uploaded content is ever placed inside this HTML.
+    st.markdown(
+        """
+        <style>
+          .block-container {padding-top: 2rem; max-width: 1200px;}
+          .ops-badge {display:inline-block; padding:0.1rem 0.55rem; border-radius:0.25rem;
+                      font-size:0.78rem; font-weight:600; letter-spacing:0.03em; border:1px solid;}
+          .ops-HIGH {color:#8a1c1c; background:#fbeaea; border-color:#e6b8b8;}
+          .ops-MEDIUM {color:#7a4b00; background:#fdf3e1; border-color:#ecd3a3;}
+          .ops-LOW {color:#3b4a5a; background:#eef1f4; border-color:#cdd5de;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def badge(severity: Severity) -> str:
@@ -90,10 +117,16 @@ def current_config() -> MatchConfig | None:
         return None
 
 
-def ai_sidebar() -> webapp.AIStatus | None:
-    """Optional AI explanations: off by default. Returns the readiness when the user has turned them on."""
+def ai_sidebar(public_demo: bool = False) -> webapp.AIStatus | None:
+    """Optional AI explanations: off by default. Returns the readiness when the user has turned them on.
+
+    In the public demo there is no toggle and the readiness (which reads the key's presence) is never checked.
+    """
     with st.sidebar:
         st.header("AI explanations")
+        if public_demo:
+            st.caption("Not available in the public demo. Reconciliation never uses AI.")
+            return None
         if not st.toggle("Enable AI explanations (optional)", value=False, key="ai_enabled"):
             st.caption("Off. Reconciliation never uses AI; explanations are optional and advisory.")
             return None
@@ -209,9 +242,20 @@ def show_ai_explanation(result, exc, status: webapp.AIStatus, run_key: str) -> N
         show_ai_view(views[key])
 
 
-def collect_inputs() -> tuple[dict[str, Upload | None], Upload | None]:
-    """The data files and the optional import profile (never used with the bundled sample)."""
+def collect_inputs(public_demo: bool = False) -> tuple[dict[str, Upload | None], Upload | None]:
+    """The data files and the optional import profile (never used with the bundled sample).
+
+    The public demo offers the bundled synthetic sample only: no upload widget is ever created.
+    """
     st.subheader("1. Input files")
+    if public_demo:
+        st.caption("The public demo runs the bundled synthetic sample (`data/sample/`, read only), in which 3 "
+                   "validation issues and 18 exceptions are seeded deliberately.")
+        uploads = webapp.sample_uploads()
+        if any(uploads.get(spec.key) is None for spec in INPUTS if spec.required):
+            st.error("The bundled sample data is missing from this installation, so the demo cannot run. Install "
+                     "the project in editable mode from a full checkout (see requirements.txt).")
+        return uploads, None
     source = st.radio("Data source", ["Upload my files", "Use bundled sample data"], horizontal=True,
                       key="source", label_visibility="collapsed")
     if source == "Use bundled sample data":
@@ -355,9 +399,11 @@ def show_validation(result, names: dict[str, str]) -> None:
     st.markdown("Rows listed here were **rejected and excluded from matching**. A rejected row can cause or hide "
                 "exceptions, so correct these first and run again. *Line* is the line number in the CSV file "
                 "(the header is line 1); a blank line means the whole file was affected.")
+    # Fixed widths and taller rows (see VALIDATION_COLUMNS) let long problems wrap instead of being cut off.
     st.dataframe(pd.DataFrame([{
         "File": names.get(i.file, i.file), "Line": i.row, "Field": i.field or "", "Value": i.value or "",
-        "Problem": i.message} for i in issues]), hide_index=True, width="stretch")
+        "Problem": i.message} for i in issues]), hide_index=True, width="stretch",
+        column_config=VALIDATION_COLUMNS, row_height=VALIDATION_ROW_HEIGHT)
 
 
 def show_downloads(result) -> None:
@@ -376,65 +422,83 @@ def show_downloads(result) -> None:
 # Page
 # --------------------------------------------------------------------------- #
 
-st.title("OpsResolve")
-st.markdown("Three-way match of **purchase orders**, **supplier invoices** and **goods receipts**. Deterministic "
-            "rules flag discrepancies with their evidence and a recommended next step.")
-st.caption("Findings are reconciliation exceptions for human review, not approvals, payment decisions or fraud "
-           "determinations. This tool has not been validated on real supplier data.")
+def main(public_demo: bool = False) -> None:
+    """The page. ``public_demo`` limits it to the bundled synthetic sample, without uploads or AI."""
+    page_setup()
+    if public_demo:
+        # Visitors never see error details such as tracebacks or file paths. Set here rather than in a config file:
+        # hosted apps share the repository's single .streamlit/config.toml with the local app.
+        st.set_option("client.showErrorDetails", "none")
+    st.title("OpsResolve")
+    st.markdown("Three-way match of **purchase orders**, **supplier invoices** and **goods receipts**. Deterministic "
+                "rules flag discrepancies with their evidence and a recommended next step.")
+    st.caption("Findings are reconciliation exceptions for human review, not approvals, payment decisions or fraud "
+               "determinations. This tool has not been validated on real supplier data.")
+    if public_demo:
+        st.info(PUBLIC_DEMO_NOTICE)
+    elif st.get_option("server.address") not in LOCAL_ADDRESSES:
+        st.error("This local app accepts file uploads, so it runs only when the server listens on this computer "
+                 "alone. Stop it (Ctrl+C) and start it with:")
+        st.code(LOCAL_LAUNCH_COMMAND, language="bash")
+        return
 
-config = current_config()
-ai_status = ai_sidebar()
-uploads, profile_upload = collect_inputs()
-profile_check = webapp.check_profile(profile_upload) if profile_upload is not None else None
-if profile_check is not None:
-    show_profile_check(profile_check)
-profile_invalid = profile_check is not None and not profile_check.valid
+    config = current_config()
+    ai_status = ai_sidebar(public_demo)
+    uploads, profile_upload = collect_inputs(public_demo)
+    profile_check = webapp.check_profile(profile_upload) if profile_upload is not None else None
+    if profile_check is not None:
+        show_profile_check(profile_check)
+    profile_invalid = profile_check is not None and not profile_check.valid
 
-missing = [spec.label for spec in INPUTS if spec.required and uploads.get(spec.key) is None]
-current = webapp.fingerprint(uploads, config, profile_upload) if config is not None else None
-stored = st.session_state.get("last_run")
-if stored is not None and stored["fingerprint"] != current:
-    del st.session_state["last_run"]  # inputs or settings changed: never show results for other data
-    st.session_state.pop("ai_views", None)  # and no AI explanation of them either
-    stored = None
-    st.info("Inputs or settings changed since the last run. Run the reconciliation again to see results.")
+    missing = [spec.label for spec in INPUTS if spec.required and uploads.get(spec.key) is None]
+    current = webapp.fingerprint(uploads, config, profile_upload) if config is not None else None
+    stored = st.session_state.get("last_run")
+    if stored is not None and stored["fingerprint"] != current:
+        del st.session_state["last_run"]  # inputs or settings changed: never show results for other data
+        st.session_state.pop("ai_views", None)  # and no AI explanation of them either
+        stored = None
+        st.info("Inputs or settings changed since the last run. Run the reconciliation again to see results.")
 
-st.subheader("2. Run")
-if missing:
-    st.caption("Waiting for: " + ", ".join(missing) + ".")
-if profile_invalid:
-    st.caption("Waiting for a valid import profile (or remove it to use the built-in format).")
-if st.button("Run reconciliation", type="primary", disabled=bool(missing) or config is None or profile_invalid,
-             key="run_button"):
-    with st.spinner("Reconciling…"):
-        try:
-            profile = profile_check.profile if profile_check is not None else None
-            result = webapp.run_reconciliation(uploads, config, profile)
-        except MissingInputError as exc:
-            st.error(str(exc))
-        except Exception as exc:  # unexpected engine failure: report it, keep no partial results
-            st.error(f"Processing failed unexpectedly ({type(exc).__name__}). No results were produced.")
-        else:
-            stored = {"fingerprint": current, "result": result}
-            st.session_state["last_run"] = stored
+    st.subheader("2. Run")
+    if missing:
+        st.caption("Waiting for: " + ", ".join(missing) + ".")
+    if profile_invalid:
+        st.caption("Waiting for a valid import profile (or remove it to use the built-in format).")
+    if st.button("Run reconciliation", type="primary", disabled=bool(missing) or config is None or profile_invalid,
+                 key="run_button"):
+        with st.spinner("Reconciling…"):
+            try:
+                profile = profile_check.profile if profile_check is not None else None
+                result = webapp.run_reconciliation(uploads, config, profile)
+            except MissingInputError as exc:
+                st.error(str(exc))
+            except Exception as exc:  # unexpected engine failure: report it, keep no partial results
+                st.error(f"Processing failed unexpectedly ({type(exc).__name__}). No results were produced.")
+            else:
+                stored = {"fingerprint": current, "result": result}
+                st.session_state["last_run"] = stored
 
-st.subheader("3. Results")
-if stored is None:
-    st.caption("Results appear here after a run.")
-else:
-    result = stored["result"]
-    # The fingerprint matched, so the contents are the ones this result was computed from; take the
-    # file names from the current uploads (the same bytes may have been re-uploaded under a new name).
-    names = webapp.display_names(uploads)
-    if result.profile is not None:  # the profile this result was actually read with
-        st.markdown(webapp.profile_caption(result.profile))
-    show_summary(webapp.summarize(result, names))
-    tab_exc, tab_val, tab_dl = st.tabs([
-        f"Exceptions ({len(result.exceptions)})", f"Validation issues ({len(result.dataset.issues)})", "Downloads"])
-    with tab_exc:
-        # Computed once per run and kept with it; a new run or changed inputs or settings replace them.
-        show_exceptions(result, ai_status, stored["fingerprint"], webapp.cached_investigations(stored), names)
-    with tab_val:
-        show_validation(result, names)
-    with tab_dl:
-        show_downloads(result)
+    st.subheader("3. Results")
+    if stored is None:
+        st.caption("Results appear here after a run.")
+    else:
+        result = stored["result"]
+        # The fingerprint matched, so the contents are the ones this result was computed from; take the
+        # file names from the current uploads (the same bytes may have been re-uploaded under a new name).
+        names = webapp.display_names(uploads)
+        if result.profile is not None:  # the profile this result was actually read with
+            st.markdown(webapp.profile_caption(result.profile))
+        show_summary(webapp.summarize(result, names))
+        tab_exc, tab_val, tab_dl = st.tabs([
+            f"Exceptions ({len(result.exceptions)})", f"Validation issues ({len(result.dataset.issues)})", "Downloads"])
+        with tab_exc:
+            # Computed once per run and kept with it; a new run or changed inputs or settings replace them.
+            show_exceptions(result, ai_status, stored["fingerprint"], webapp.cached_investigations(stored), names)
+        with tab_val:
+            show_validation(result, names)
+        with tab_dl:
+            show_downloads(result)
+
+
+if __name__ == "__main__":  # run as the entrypoint; the public demo imports this module and calls main(True)
+    main()

@@ -11,6 +11,7 @@ from opsresolve.config import MatchConfig
 from opsresolve.ingestion import REQUIRED_COLUMNS
 from opsresolve.models import ExceptionType, Severity
 from opsresolve.pipeline import investigate_files
+from opsresolve.reporting import render_markdown, rules_line
 from opsresolve.webapp import (
     INPUTS,
     MissingInputError,
@@ -428,6 +429,32 @@ def test_settings_keep_more_decimals_when_the_default_needs_them():
     spec = next(s for s in webapp.SETTINGS if s.field == "price_tolerance_abs")
     assert webapp.setting_decimals(spec, env.price_tolerance_abs) == 3
     assert webapp.normalize_setting(float(env.price_tolerance_abs), 3) == Decimal("0.125")
+
+
+def report_rules(result) -> str:
+    return next(line for line in summary_markdown(result).decode("utf-8").splitlines() if line.startswith("Rules: "))
+
+
+def test_web_and_cli_reports_print_the_default_settings_identically():
+    web = run_reconciliation(sample_uploads(), webapp.config_from_inputs(*default_inputs()))
+    sample = REPO / "data" / "sample"
+    cli = investigate_files(sample / "purchase_orders.csv", sample / "invoices.csv", sample / "goods_received.csv",
+                            MatchConfig())  # as the CLI runs it
+    expected = "Rules: price tolerance 0% / 0.00 absolute; quantity tolerance 0; duplicate window 30 days."
+    assert report_rules(web) == expected
+    assert next(line for line in render_markdown(cli).splitlines() if line.startswith("Rules: ")) == expected
+
+
+def test_report_settings_read_the_same_however_they_were_written():
+    values, decimals = default_inputs(price_tolerance_pct=2.5, price_tolerance_abs=0.1, quantity_tolerance=1.0)
+    web = webapp.config_from_inputs(values, decimals)  # 2.50, 0.10 and 1.00 as displayed
+    env = MatchConfig.from_env({"OPSRESOLVE_PRICE_TOLERANCE_PCT": "2.5", "OPSRESOLVE_PRICE_TOLERANCE_ABS": "0.1",
+                                "OPSRESOLVE_QUANTITY_TOLERANCE": "1"})
+    expected = "Rules: price tolerance 2.5% / 0.10 absolute; quantity tolerance 1; duplicate window 30 days."
+    assert rules_line(web) == rules_line(env) == expected
+    # More decimals than two are kept, never rounded away.
+    fine = MatchConfig.from_env({"OPSRESOLVE_PRICE_TOLERANCE_ABS": "0.125"})
+    assert "/ 0.125 absolute;" in rules_line(fine)
 
 
 def test_integer_and_invalid_settings():

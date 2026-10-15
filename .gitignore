@@ -23,6 +23,8 @@ htmlcov/
 !.env.example
 *.pem
 *.key
+# Streamlit secrets (local or hosted); hosted secrets are entered in the platform's settings, never committed
+secrets.toml
 
 # Generated reports (regenerate with the CLI)
 reports/

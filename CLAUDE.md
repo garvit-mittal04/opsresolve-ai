@@ -18,6 +18,8 @@ and deterministic investigation checks (Stage D) that test candidate explanation
 against the loaded records, labelled "consistent with the data — not confirmed", "contradicted by the data" or
 "can't be checked" (shown per finding in the web app; written by the CLI to `investigations.csv` only with
 `--with-investigations`; never confirmed causes; see `docs/architecture.md`, "Investigation checks").
+A restricted public-demo mode (`demo/streamlit_app.py`: bundled synthetic sample only, no uploads, no AI) is
+prepared for a portfolio deployment; it has not been deployed.
 See `docs/architecture.md`; Milestone 7's approved deviations and deferred follow-ups are listed in
 `docs/validation-plan.md` (section 5).
 
@@ -61,7 +63,11 @@ src/opsresolve/
   investigation.py Candidate explanations checked against cited records (fixed catalogue; pure; no LLM)
   ai.py          Optional Anthropic provider: config, request, pseudonymisation, explain_exception
   cli.py         Command-line entry point
-app.py           Streamlit local web app (layout only; run: streamlit run app.py)
+app.py           Streamlit local web app (layout only; main(public_demo) holds the page;
+                 run: streamlit run app.py --server.address localhost)
+demo/            Public-demo entrypoint only (streamlit_app.py calls app.main(public_demo=True)); no config of its own
+.streamlit/      The repository's single Streamlit config, shared by local runs and the hosted demo (no server address)
+requirements.txt The hosted demo's one dependency file (editable install of the app extra + pins within pyproject ranges)
 data/sample/     Synthetic CSVs + README describing every seeded scenario
 data/evaluation/ Labelled evaluation dataset (scenarios.csv, expected_exceptions.csv)
 tests/           Pytest suite (unit, end-to-end, evaluation, web-app helpers, Streamlit AppTest UI, import profiles;
@@ -69,7 +75,7 @@ tests/           Pytest suite (unit, end-to-end, evaluation, web-app helpers, St
                  test_investigation.py and the --with-investigations CSV test_investigations_csv.py)
 tests/fixtures/profiles/  Import-profile fixtures; reformatted copies of the sample and evaluation data (each with a README)
 tests/fixtures/investigations/  Investigation-check fixtures (scenarios A–R) with hand-written expected results (README)
-docs/            architecture.md, validation-plan.md; examples/import-profile-example.json
+docs/            architecture.md, validation-plan.md; examples/import-profile-example.json; images/ (README screenshots)
 ```
 
 ## Commands
@@ -80,7 +86,8 @@ pip install -e ".[dev,app]"  # "app" adds Streamlit; without it the UI tests are
                              # add "ai" for the Anthropic SDK; without it the real-SDK tests are skipped
 pytest                       # run all tests
 python -m opsresolve         # run on data/sample, write reports/ (git-ignored)
-python -m streamlit run app.py   # local web app on http://localhost:8501
+python -m streamlit run app.py --server.address localhost   # local web app on http://localhost:8501
+python -m streamlit run demo/streamlit_app.py --server.address localhost   # public-demo mode, locally
 ```
 
 ## Working conventions
@@ -100,7 +107,18 @@ python -m streamlit run app.py   # local web app on http://localhost:8501
 - Keep dependencies minimal (pandas, pydantic; pytest for dev; Streamlit only in the optional `app` extra;
   the Anthropic SDK only in the optional `ai` extra).
 - The web app must stay a thin layer: no business rules in `app.py` or `webapp.py`, uploaded text never
-  rendered as raw Markdown/HTML, and the server bound to localhost with telemetry off.
+  rendered as raw Markdown/HTML, telemetry off, and the local app bound to localhost: every documented launch
+  command passes `--server.address localhost` (tested), and `app.main()` refuses to run in local mode on any other
+  address (`app.LOCAL_ADDRESSES`). Keep this guard; it also stops `app.py` from being deployed publicly.
+- Public demo (`demo/streamlit_app.py`): only the bundled synthetic sample; never create an upload widget, an AI
+  toggle or an AI call in demo mode, and never check AI readiness there (`tests/test_public_demo.py`). Keep the demo
+  entrypoint a one-line call of `app.main(public_demo=True)`. Streamlit Community Cloud reads only the root
+  `.streamlit/config.toml`, so never add another config file (for example under `demo/`) or set the server address
+  in the root one; demo-only settings are made in code (`st.set_option` of a scriptable `client.*` option). Keep
+  `requirements.txt` the only dependency file Community Cloud sees: `-e .[app]` (editable: the sample is found next
+  to the source tree) plus pins inside `pyproject.toml`'s ranges, no AI extra, and no `uv.lock`, `Pipfile` or
+  dependency file under `demo/`. No secrets in the repository; hosted secrets are not needed. Never claim the demo
+  is deployed or tested at a public URL until it has been.
 - Import profiles: never discover or guess a profile, delimiter, encoding or format; a profile is used only
   when explicitly selected. Without a profile, data ingestion and reconciliation must stay unchanged: the same
   records, validation issues, exceptions and report content as before profiles existed (the no-profile tests

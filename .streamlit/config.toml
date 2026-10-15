@@ -1,11 +1,15 @@
-# Streamlit settings for the local OpsResolve web app (read when running `streamlit run app.py`
-# from the repository root).
+# Streamlit settings for this repository: the only .streamlit/config.toml, read both by local runs and by a
+# hosted deployment (Streamlit Community Cloud reads one config file, at the repository root, whatever the
+# entrypoint). Streamlit finds it when launched from the repository root.
+#
+# The server address is deliberately not set here, so a hosting platform can bind the public demo as it needs.
+# Local runs bind themselves to this computer on the command line:
+#   streamlit run app.py --server.address localhost
+#   streamlit run demo/streamlit_app.py --server.address localhost
+# The local app (app.py) accepts uploads and refuses to run unless it is bound to localhost.
 
 [server]
-# Listen on this computer only; the app is not reachable from other devices on the network.
-address = "localhost"
-port = 8501
-# Largest accepted upload, in megabytes.
+# Largest accepted upload, in megabytes (the public demo creates no upload widget).
 maxUploadSize = 20
 # Keep Streamlit's default cross-site request forgery protection on.
 enableXsrfProtection = true
@@ -13,7 +17,6 @@ enableXsrfProtection = true
 [browser]
 # Do not send anonymous usage statistics to Streamlit.
 gatherUsageStats = false
-serverAddress = "localhost"
 
 [client]
 toolbarMode = "minimal"

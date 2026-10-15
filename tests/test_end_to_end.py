@@ -105,6 +105,14 @@ def test_rejected_rows_annotate_related_exceptions(result):
         assert any("rejected during input validation" in n for n in find(result, exc_type, po_number).notes)
 
 
+def test_rejected_row_notes_name_the_file_grammatically(result):
+    notes = [n for e in result.exceptions for n in e.notes if "rejected during input validation" in n]
+    assert len(notes) == 4  # PO 4500010012 (2 exceptions), 4500010011 and 4500010013
+    assert all(n.startswith("A row of the ") for n in notes)
+    assert ("A row of the invoices file for PO 4500010011 / SKU FST-ANCH-10 was rejected during input validation. "
+            "This exception may be a consequence of that data error; review the validation issues first.") in notes
+
+
 def test_markdown_report_contents(result):
     text = render_markdown(result)
     assert "# OpsResolve Exception Report" in text

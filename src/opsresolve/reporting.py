@@ -17,6 +17,7 @@ from typing import Mapping
 
 import pandas as pd
 
+from opsresolve.config import MatchConfig
 from opsresolve.detection import fmt_money, fmt_qty
 from opsresolve.models import ExceptionType, Severity
 from opsresolve.pipeline import InvestigationResult
@@ -44,6 +45,22 @@ def _amounts_by_type(result: InvestigationResult) -> dict[ExceptionType, dict[st
     return totals
 
 
+def _setting_text(value: Decimal, min_places: int = 0) -> str:
+    """A setting without trailing zeros (at least ``min_places`` decimals), so the same value always reads the
+    same: 0, 0.00 and 0.000 all print as 0 (or 0.00 with two places), wherever the configuration came from."""
+    text = format(value.normalize(), "f")
+    places = len(text.partition(".")[2])
+    return format(value, f".{min_places}f") if places < min_places else text
+
+
+def rules_line(cfg: MatchConfig) -> str:
+    """The report's settings line. The absolute price tolerance is a money amount, so it keeps two decimals."""
+    return (f"Rules: price tolerance {_setting_text(cfg.price_tolerance_pct)}% / "
+            f"{_setting_text(cfg.price_tolerance_abs, 2)} absolute; "
+            f"quantity tolerance {_setting_text(cfg.quantity_tolerance)}; "
+            f"duplicate window {cfg.duplicate_window_days} days.")
+
+
 def render_markdown(result: InvestigationResult) -> str:
     out: list[str] = []
     add = out.append
@@ -51,8 +68,7 @@ def render_markdown(result: InvestigationResult) -> str:
     add("")
     add(f"Generated: {result.generated_at:%Y-%m-%d %H:%M UTC}  ")
     cfg = result.config
-    add(f"Rules: price tolerance {cfg.price_tolerance_pct}% / {cfg.price_tolerance_abs} absolute; "
-        f"quantity tolerance {cfg.quantity_tolerance}; duplicate window {cfg.duplicate_window_days} days.")
+    add(rules_line(cfg))
     add("")
     if result.profile is not None:
         add(_profile_line(result.profile, _MARKDOWN_SPECIAL.sub(r"\\\1", result.profile.name)))

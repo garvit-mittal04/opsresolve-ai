@@ -310,14 +310,14 @@ def _input_limitations(result: InvestigationResult, exception: OpsException, use
             limitations.append(f"The {label} file has file-level validation problems, so some or all of its "
                                f"records are not available.")
         if exception.po_number is not None and exception.sku is not None and key in loaded.rejected_keys:
-            limitations.append(f"A {label} row for PO {key[0]} / SKU {key[1]} was rejected during input "
-                               f"validation, so it is not part of this evidence.")
+            limitations.append(f"A row of the {label} file for PO {key[0]} / SKU {key[1]} was rejected during "
+                               f"input validation, so it is not part of this evidence.")
         unlinked = sorted({issue.row for issue in loaded.issues
                            if issue.row is not None and issue.field in _LINE_KEY_FIELDS})
         if unlinked:
             lines = ", ".join(f"{label} line {row}" for row in unlinked)
-            limitations.append(f"Rejected {label} rows without a usable PO number or SKU ({lines}) could not "
-                               f"be linked to a PO line and may belong to this one.")
+            limitations.append(f"Rejected rows of the {label} file without a usable PO number or SKU ({lines}) "
+                               f"could not be linked to a PO line and may belong to this one.")
     conversions = result.dataset.uom_conversions
     if uses_units and conversions is not None and conversions.issues:
         limitations.append("The uom_conversions file has validation problems, so a conversion for this SKU "
